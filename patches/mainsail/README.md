@@ -1,8 +1,9 @@
 # Mainsail toolchanger integration: our patches
 
 > **ALL MACROS, PATCHES AND DOCS IN THIS REPOSITORY, EVEN THOSE BASED ON REAL UPSTREAM PROJECTS, ARE
-> ENTIRELY VIBE-CODED. ALL KLIPPER EXPERTISE IS IMPERSONATED... POORLY.** Most of it was written with an AI
-> assistant (Claude) and checked only as far as one printer goes. THE FOLLOWING REPOSITORY CONTAINS COARSE
+> MOSTLY VIBE-CODED. ALL KLIPPER EXPERTISE IS IMPERSONATED... POORLY.** Most of it was written with an AI
+> assistant (Claude). The ideas, the hardware, the testing and the yelling at the AI when it got things
+> wrong are human. It is checked only as far as one printer goes. THE FOLLOWING REPOSITORY CONTAINS COARSE
 > G-CODE AND, DUE TO ITS CONTENT, SHOULD NOT BE FLASHED TO ANYONE'S PRINTER. Read it before you run it.
 >
 > **In testing. No maintenance commitment.** These patch the built bundle of

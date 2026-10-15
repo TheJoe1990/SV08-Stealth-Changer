@@ -1,0 +1,17 @@
+--- upstream/examples/extras/tool_drop_detection/tool_drop_detection.cfg @ fbcd211
++++ config/toolchanger/tool_drop_detection.cfg
+@@ -5,7 +5,7 @@
+ peak_g_threshold: 15
+ rotation_threshold: 45
+ 
+-accelerometer: T0, T1
++accelerometer: T0, T1, T2, T3   # T3 added 2026-10-03
+ 
+ crash_gcode:
+   RESPOND MSG="(state at failure: pitch:'{pitch}°', roll:'{roll}°', vector:'{vector}°', peak:'{peak}g')"
+@@ -74,4 +74,4 @@
+   {% endfor %}
+ 
+   TDD_REFERENCE_DUMP ACCEL={accel_list}
+-  RESPOND MSG="Shuttle baselines updated for ACCEL={accel_list}."
++  RESPOND MSG="Shuttle baselines updated for ACCEL={accel_list}."

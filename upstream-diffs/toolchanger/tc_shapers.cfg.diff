@@ -1,0 +1,749 @@
+--- upstream/examples/misc-macros/tc_shapers.cfg @ fbcd211
++++ config/toolchanger/tc_shapers.cfg
+@@ -1,403 +1,351 @@
+-
+-[Input_shaper]
+-
++# ============================================================
++# tc_shapers.cfg — Toolchanger per-tool/per-axis input shapers
++# Stays close to Contomo tc_shapers.cfg style
++# ============================================================
++
++# NOTE: input_shaper section is normally [input_shaper] (lowercase)
++# You likely already have one in printer.cfg; if so, do NOT duplicate it.
++# If you don't have one, add this (else ignore):
++
++[input_shaper]
++shaper_freq_x: 0
++shaper_type_x: mzv
++shaper_freq_y: 0
++shaper_type_y: mzv
++damping_ratio_x: 0.10
++damping_ratio_y: 0.10
++
++
++# ------------------------------------------------------------
++# Wrapper: make SHAPER_CALIBRATE auto-pick the tool's accel chip
++# ------------------------------------------------------------
++[gcode_macro SHAPER_CALIBRATE]
++rename_existing: _SHAPER_CALIBRATE
++gcode:
++  {% set tc = printer.toolchanger %}
++  {% set tn = tc.tool_number|int %}
++  {% set name = tc.tool_names[tn] %}
++  {% set tool = printer[name] %}
++
++  # Prefer per-tool param: params_accelerometer
++  # Fallback: "adxl345 t0" naming pattern like in the example
++  {% set accel = (tool.get('params_accelerometer', 'adxl345 ' ~ name|replace('tool ', '')))|string %}
++
++  {% if 'CHIPS' not in params and accel|lower in printer.configfile.settings %}
++    {% set _ = params.update({'CHIPS': accel}) %}
++  {% endif %}
++
++  _SHAPER_CALIBRATE {params|xmlattr}
++
++
++# ------------------------------------------------------------
++# Save pending shaper values into Save Variables (SVF)
++# ------------------------------------------------------------
++[gcode_macro _TC_SHAPER_CALIBRATE_SAVE_TO_SVF]
++description: Save pending input_shaper values into SVF for a tool number
++variable_defaults: {'type': "MZV", 'freq': 0.0, 'damp': 0.2}
++gcode:
++  {% set pend = printer.configfile.save_config_pending_items.input_shaper or {} %}
++  {% if pend == {} %}
++    RESPOND TYPE=error MSG="No pending input_shaper data found (nothing to save)."
++    RETURN
++  {% endif %}
++
++  {% set tc = printer.toolchanger %}
++  {% set tn = params.T|default(tc.tool_number)|int %}
++  {% if tn not in tc.tool_numbers %}
++    RESPOND TYPE=error MSG="_TC_SHAPER_CALIBRATE_SAVE_TO_SVF: Invalid tool T={tn}"
++    RETURN
++  {% endif %}
++
++  {% set defaults = printer["gcode_macro _TC_SHAPER_CALIBRATE_SAVE_TO_SVF"].defaults %}
++
++  {% set svf_key = 'shapers_t' ~ tn|string %}
++  {% set svf     = printer.save_variables.variables or {} %}
++  {% set merged  = svf.get(svf_key, {'x': {}, 'y': {}}) %}
++
++  {% for ax in ['x','y'] %}
++    {% set cur  = merged.get(ax, {}) %}
++
++    {% set tkey = 'shaper_type_' ~ ax %}
++    {% set tval = (pend.get(tkey, cur.get('type', defaults['type'])) | string).upper() %}
++    {% set is_sm = ('SMOOTH' in tval) %}
++
++    {% set fkey = ('smoother_freq_' if is_sm else 'shaper_freq_') ~ ax %}
++    {% set fval = pend.get(fkey, cur.get('freq', defaults['freq'])) %}
++
++    {% set dkey = 'damping_ratio_' ~ ax %}
++    {% set dval = (pend.get(dkey, cur.get('damp', defaults['damp'])) if not is_sm else none) %}
++
++    {% set _ = cur.update({'type': tval, 'freq': (fval|float)}) %}
++    {% if (not is_sm) and (dval is not none) %}
++      {% set _ = cur.update({'damp': (dval|float)}) %}
++    {% endif %}
++    {% set _ = merged.update({ax: cur}) %}
++  {% endfor %}
++
++  SAVE_VARIABLE VARIABLE={svf_key} VALUE="{merged}"
++  { action_respond_info("Saved shapers to SVF key '" ~ svf_key ~ "': " ~ merged|tojson) }
++
++
++
++
++# ------------------------------------------------------------
++# Load shapers for a tool (SVF preferred, tool params fallback)
++# ------------------------------------------------------------
++[gcode_macro TC_LOAD_SHAPERS]
++description: "Load per-tool shapers from save_variables (respects TC_LOGGING.verbose; avoids re-applying unchanged values)"
++gcode:
++  {% set verbose = printer["gcode_macro TC_LOGGING"].verbose|int if "gcode_macro TC_LOGGING" in printer else 0 %}
++  {% set tc = printer.toolchanger if "toolchanger" in printer else None %}
++  {% set tn = params.T|default(tc.tool_number if tc else 0)|int %}
++
++  {% set sv = printer.save_variables.variables if "save_variables" in printer else {} %}
++  {% set key = "shapers_t" ~ tn|string %}
++  {% set rec = sv.get(key, none) %}
++
++  {% set ns = namespace(valid=0, can_compare=0, changed=1) %}
++
++  # --- Validate saved record ---
++  {% if rec is mapping and rec.get("x", none) is mapping and rec.get("y", none) is mapping %}
++    {% set ns.valid = 1 %}
++  {% endif %}
++
++  {% if ns.valid == 0 %}
++    {% if verbose %}
++      { action_respond_info("TC_LOAD_SHAPERS: no valid saved shapers for T" ~ tn ~ " (" ~ key ~ ")") }
++    {% endif %}
++  {% else %}
++    {% set x = rec.get("x") %}
++    {% set y = rec.get("y") %}
++
++    {% set xt = (x.get("type", "mzv")|string)|upper %}
++    {% set xf = (x.get("freq", 0.0)|float) %}
++    {% set xd = (x.get("damp", 0.1)|float) %}
++
++    {% set yt = (y.get("type", "mzv")|string)|upper %}
++    {% set yf = (y.get("freq", 0.0)|float) %}
++    {% set yd = (y.get("damp", 0.1)|float) %}
++
++    # --- If we can read current shaper state, only apply when changed ---
++    {% if "input_shaper" in printer %}
++      {% set cur = printer.input_shaper %}
++      {% set cur_xt = (cur.shaper_type_x|string)|upper %}
++      {% set cur_yt = (cur.shaper_type_y|string)|upper %}
++      {% set cur_xf = (cur.shaper_freq_x|float) %}
++      {% set cur_yf = (cur.shaper_freq_y|float) %}
++      {% set cur_xd = (cur.damping_ratio_x|float) %}
++      {% set cur_yd = (cur.damping_ratio_y|float) %}
++      {% set ns.can_compare = 1 %}
++
++      # Compare with small tolerance on floats
++      {% set eps = 0.0005 %}
++      {% if cur_xt == xt and cur_yt == yt
++            and (cur_xf - xf)|abs < eps
++            and (cur_yf - yf)|abs < eps
++            and (cur_xd - xd)|abs < eps
++            and (cur_yd - yd)|abs < eps %}
++        {% set ns.changed = 0 %}
++      {% endif %}
++    {% endif %}
++
++    {% if ns.changed == 1 %}
++      # IMPORTANT: one single line, no "\" continuation (prevents Malformed command)
++      SET_INPUT_SHAPER SHAPER_TYPE_X={xt} SHAPER_FREQ_X={xf} DAMPING_RATIO_X={xd} SHAPER_TYPE_Y={yt} SHAPER_FREQ_Y={yf} DAMPING_RATIO_Y={yd}
++
++      {% if verbose %}
++        { action_respond_info(
++            "Loaded shapers for T" ~ tn ~
++            ": X=" ~ xt ~ "@" ~ (xf|round(1)) ~ "Hz d=" ~ (xd|round(3)) ~
++            " | Y=" ~ yt ~ "@" ~ (yf|round(1)) ~ "Hz d=" ~ (yd|round(3))
++        ) }
++      {% endif %}
++    {% else %}
++      {% if verbose %}
++        { action_respond_info("TC_LOAD_SHAPERS: T" ~ tn ~ " already set (no change)") }
++      {% endif %}
++    {% endif %}
++  {% endif %}
++
++
++
++# ------------------------------------------------------------
++# Calibrate shapers for one tool or many tools
++# Usage:
++#   TC_SHAPER_CALIBRATE           (defaults to current tool)
++#   TC_SHAPER_CALIBRATE T=2
++#   TC_SHAPER_CALIBRATE T=all
++#   TC_SHAPER_CALIBRATE T=0,2
++# ------------------------------------------------------------
+ [gcode_macro TC_SHAPER_CALIBRATE]
+-description: Runs a shaper thingy [T=<0,1,2...> or <all>], default → current tool
++description: Runs shaper calibration [T=<0,1,2...> or <all>], default → all
+ variable_save_to_svf: True
+ variable_save_to_config: False
+ variable_show_images: True
+-
+-
+-[gcode_macro SHOW_LATEST_SHAPER_PLOT]
+-description: Find latest shaper CSV (X/Y), render plot(s), and post clickable previews
+-variable_settings: {
+-        'save_path':         '~/printer_data/config/shaper_images',
+-        'async':             1,
+-        'prefix':            'shaper_plot_',
+-        'suffix':            '%Y-%m-%d_%H-%M',
+-        'axis':              'XY',
+-        'max_px':            400,
+-        'open_size_percent': 70,
+-        'python_path':       '',
+-        'script_path':       '~/klipper/scripts/calibrate_shaper.py',
+-    }
+-variable_verbose: True
+-
+-[gcode_macro _TC_SHAPER_CALIBRATE_SAVE_TO_SVF]
+-description: Save pending input_shaper values into SVF for tools
+-variable_defaults: {
+-        'type': "MZV",
+-        'freq': 0.0,
+-        'damp': 0.2
+-    } 
++gcode:
++  # 2026-10-04: refuse if any tool accelerometer has no axes_map (Y was being
++  # measured on the wrong axis for every tool until then). Must stay first.
++  _REQUIRE_ADXL_AXES_MAP
++  {% set P      = printer %}
++  {% set tc     = P.toolchanger %}
++  {% set tns    = tc.tool_numbers %}
++  {% set cur    = tc.tool_number|int %}
++  {% set req = (params.T|string|lower) if ('T' in params) else 'all' %}
++  {% set queue  = [] %}
++
++  # Build tool queue (keep current tool first if included)
++  {% if req == 'all' %}
++    {% for tn in tns %}
++      {% set _ = queue.append(tn) %}
++    {% endfor %}
++  {% else %}
++    {% for raw in req.split(',')|map('trim') %}
++      {% set tn = raw|int(-1) %}
++      {% if tn in tns and tn not in queue %}
++        {% set _ = queue.insert(0, tn) if tn == cur else queue.append(tn) %}
++      {% elif raw and tn not in tns %}
++        { action_respond_info("TC_SHAPER_CALIBRATE: tool '" ~ raw ~ "' invalid, skipping.") }
++      {% endif %}
++    {% endfor %}
++  {% endif %}
++
++  {% if queue|length == 0 %}
++    RESPOND TYPE=error MSG="TC_SHAPER_CALIBRATE: No valid tools to process."
++    RETURN
++  {% endif %}
++  {% if tc.status != 'ready' %}
++    RESPOND TYPE=error MSG="TC_SHAPER_CALIBRATE: toolchanger status '{tc.status}' not ready."
++    RETURN
++  {% endif %}
++
++  # Home if needed
++  {% if P.toolhead.homed_axes|lower != 'xyz' %}
++    { action_respond_info("TC_SHAPER_CALIBRATE: Homing first") }
++    G28
++  {% endif %}
++
++  # Run each tool
++  {% for tn in queue %}
++    {% set name  = tc.tool_names[tn] %}
++    {% set accel = (P[name].get('params_accelerometer', 'adxl345 ' ~ name|replace('tool ', '')))|string %}
++
++    {% if accel|lower not in P.configfile.settings %}
++      RESPOND TYPE=error MSG="TC_SHAPER_CALIBRATE: missing accelerometer config section [{accel}] for {name|replace('tool ', '')}"
++      CONTINUE
++    {% endif %}
++
++    { action_respond_info("TC_SHAPER_CALIBRATE: Calibrating " ~ name|replace('tool ', '') ~ " (accel: " ~ accel ~ ")") }
++
++    {% if tn != cur %}
++      T{tn}
++    {% endif %}
+     
+-[gcode_macro SHAPER_CALIBRATE]
+-rename_existing: _SHAPER_CALIBRATE
+-gcode:
+-    {% set act_tool_name = printer.toolchanger.tool_names[printer.toolchanger.tool_number] %}
+-    {% set accel = (printer[act_tool_name].get('params_accelerometer', 'adxl345 ' ~ name|replace('tool ', '')))|string %}
+-    {% if 'CHIPS' not in params and accel|lower in printer.configfile.settings %}
+-        {% set _ = params.update({'CHIPS': accel }) %}
+-    {% endif %}
+-    _SHAPER_CALIBRATE {params|xmlattr}
+-
+-[gcode_macro TC_LOAD_SHAPERS]
+-description: "Load input_shaper from SVF (preferred) or tool params"
+-gcode:
+-    {% set SELF = 'TC_LOAD_SHAPERS' %}
+-    {% macro msg(s, prefix_color="--v-accent-base", msg_color="--p-text-color2", extra='') %}
+-        {% set extra = ('\u0026\u0023\u0031\u0030\u003b' ~ extra) if extra else extra %}
+-        {% set desc = (printer.configfile.settings['gcode_macro ' ~ SELF|lower].description|trim).rstrip('"').lstrip('"') %}
+-        {% set pre  = "<span style=\"color: var(" ~ prefix_color ~ "); font-weight:bold;\" title=\"" ~ desc ~ "\">" ~ SELF ~ " </span>" %}
+-        { action_respond_info(pre ~ "<span style=\"color: var(" ~ msg_color ~ ");\" title=\"" ~ desc ~ extra ~ "\">" ~ s ~ "</span>") }
+-    {% endmacro %}
+-    {% macro err(s) %}{ msg(s, prefix_color="--v-error-base", msg_color="--v-warning-base") }{% endmacro %}
+-
+-    {% set toolchanger = printer.toolchanger %}
+-
+-    {% set tn = params.T|default(toolchanger.tool_number)|int %}
+-    {% if tn not in toolchanger.tool_numbers %}
+-        { err('Invalid tool number: ' ~ tn) }
+-    {% else %}
+-        {% set name       = toolchanger.tool_names[tn] %}
+-        {% set tool       = printer[name] %}
+-        {% set svf_s_key  = 'shapers_' ~ name|replace('tool ', '')|lower %}
+-        {% set svf        = printer.save_variables.variables or {} %}
+-        {% set svfs       = svf.get(svf_s_key, {}) %}
+-        {% set specs = [
+-            ('type',           'SHAPER_TYPE_',         'params_input_shaper_type_'),
+-            ('freq',           'SHAPER_FREQ_',         'params_input_shaper_freq_'),
+-            ('damp',           'DAMPING_RATIO_',       'params_input_shaper_damping_ratio_') 
+-        ] %}
+-        {% set cmd = [] %}
+-        {% for ax in ['x','y'] %}
+-            {% set s      = svfs.get(ax, {}) %}
+-            
+-            {% set type   = s.get('type', tool.get('params_input_shaper_type_' ~ ax, ''))|string|upper %}
+-            {% set fval   = s.get('freq', tool.get('params_input_shaper_freq_' ~ ax, None)) %}
+-            {% set dval   = s.get('damp', tool.get('params_input_shaper_damping_ratio_' ~ ax, None)) %}
+-
+-            {% set freq_key = ('SMOOTHER' if 'SMOOTH' in type else 'SHAPER') ~ '_FREQ_' ~ ax|upper %}
+-
+-            {% set _ = cmd.append('SHAPER_TYPE_' ~ ax|upper ~ '=' ~ type) if type %}
+-            {% set _ = cmd.append(freq_key ~ '=' ~ fval) if fval %}
+-            {% set _ = cmd.append('DAMPING_RATIO_' ~ ax|upper ~ '=' ~ dval) if (not 'SMOOTH' in type) and dval %}
+-        {% endfor %}
+-
+-        {% if cmd|length == 0 %}
+-            { err('No input_shaper data found for ' ~ name|replace('tool ', '')) }
+-        {% else %}
+-            { 'SET_INPUT_SHAPER ' ~ cmd|join(' ') }
+-            { msg('Loaded ' ~ name|replace('tool ', '') ~ '\'s shapers', extra=cmd|join('\u0026\u0023\u0031\u0030\u003b')) }
+-        {% endif %}
+-    {% endif %}
+-    
+-[gcode_macro TC_SHAPER_CALIBRATE]
+-gcode:
+-    {% set SELF = 'TC_SHAPER_CALIBRATE' %}
+-    {% macro msg(s, prefix_color="--v-accent-base", msg_color="--p-text-color2") %}
+-        {% set desc = printer.configfile.settings['gcode_macro ' ~ SELF|lower].description %}
+-        {% set pre  = "<span style=\"color: var(" ~ prefix_color ~ "); font-weight:bold;\" title=\"" ~ desc ~ "\">" ~ SELF ~ " </span>" %}
+-        { action_respond_info(pre ~ "<span style=\"color: var(" ~ msg_color ~ ");\" title=\"" ~ desc ~ "\">" ~ s ~ "</span>") }
+-    {% endmacro %}
+-    {% macro err(s) %}{ msg(s, prefix_color="--v-error-base", msg_color="--v-warning-base") }{% endmacro %}
+-
+-    {% set P            = printer %}
+-    {% set cfg          = P.configfile.settings %}
+-    {% set tc           = P.toolchanger %}
+-    {% set tns          = tc.tool_numbers %}
+-    {% set cur          = tc.tool_number %}
+-    {% set req          = params.T|default(cur)|string %}
+-    {% set queue, tinfo = [], [] %}
+-
+-    {% for raw in (tns if req == 'all' else req.split(',')|map('trim')) %}
+-        {% set tn = raw|int(-1) %}
+-        {% if tn in tns and tn not in queue %} 
+-            {% set _ = queue.insert(0, tn) if tn == cur else queue.append(tn) %}
+-        {% elif raw|trim and tn not in tns %} 
+-            { msg("Tool '" ~ raw ~ "' invalid, skipping.") }
++    # 2026-10-04: one axis per call + a pause. A single both-axes call starts the Y
++    # test while klippy is still post-processing the X result; on the CB1 that stall
++    # caused "MCU 'mcu' shutdown: Timer too close" right at the start of the 2nd axis
++    # (4 times on 2026-10-04). Both axes still land in pending input_shaper items,
++    # which _TC_SHAPER_CALIBRATE_SAVE_TO_SVF reads below.
++    SHAPER_CALIBRATE CHIPS="{accel}" AXIS=X
++    M400
++    G4 P5000
++    SHAPER_CALIBRATE CHIPS="{accel}" AXIS=Y
++
++    {% if ('gcode_macro SHOW_LATEST_SHAPER_PLOT' in P.configfile.settings) and show_images %}
++      { ("SHOW_LATEST_SHAPER_PLOT PREFIX=plot_" ~ (name|replace('tool ', '')|lower)) }
++    {% endif %}
++
++    {% if save_to_svf %}
++      _TC_SHAPER_CALIBRATE_SAVE_TO_SVF T={tn}
++    {% endif %}
++
++    {% if save_to_config %}
++      # Optional: keep your original _TC_SHAPER_CALIBRATE_SAVE_PARAMS macro if you want this
++      { "_TC_SHAPER_CALIBRATE_SAVE_PARAMS NAME=\"" ~ (name|replace('tool ', '')) ~ "\"" if 'gcode_macro _TC_SHAPER_CALIBRATE_SAVE_PARAMS' in P.configfile.settings else '' }
++    {% endif %}
++  {% endfor %}
++
++[gcode_macro SAVE_CONFIG]
++rename_existing: _SAVE_CONFIG_REAL
++gcode:
++  {% if printer["gcode_macro TC_SHAPER_CALIBRATE"] is defined
++        and printer.toolchanger.status == "changing" %}
++    RESPOND TYPE=error MSG="SAVE_CONFIG is disabled for input shaper calibration. Use TC_SHAPER_CALIBRATE (SVF only)."
++    RESPOND TYPE=warning MSG="Per-tool shapers are stored via SAVE_VARIABLE and loaded with TC_LOAD_SHAPERS."
++    RETURN
++  {% endif %}
++  _SAVE_CONFIG_REAL
++
++[gcode_macro TC_SHOW_APPLIED]
++description: "Print currently-applied tool offsets, tool_probe z_offset, and shaper settings (best-effort)"
++gcode:
++  {% set tc = printer.toolchanger %}
++  {% set tn = params.T|default(tc.tool_number)|int %}
++
++  # ---- tool offsets (runtime on tool object) ----
++  {% set tool_name = tc.tool_names[tn] if tn in tc.tool_numbers else None %}
++  {% set tool_obj  = printer.printer.lookup_object(tool_name, None) if tool_name else None %}
++
++  {% if tool_obj %}
++    { action_respond_info(
++      "APPLIED tool T" ~ tn ~
++      " gcode_offsets: X=" ~ (tool_obj.gcode_x_offset|float|round(3)) ~
++      " Y=" ~ (tool_obj.gcode_y_offset|float|round(3)) ~
++      " Z=" ~ (tool_obj.gcode_z_offset|float|round(3))
++    ) }
++  {% else %}
++    { action_respond_info("APPLIED tool T" ~ tn ~ ": could not lookup tool object (" ~ (tool_name|string) ~ ")") }
++  {% endif %}
++
++  # ---- tool_probe z_offset (runtime on tool_probe object) ----
++  {% set sec = "tool_probe T" ~ tn %}
++  {% set tp  = printer.printer.lookup_object(sec, None) %}
++  {% if tp %}
++    { action_respond_info("APPLIED tool_probe T" ~ tn ~ " z_offset=" ~ (tp.z_offset|float|round(4))) }
++  {% else %}
++    { action_respond_info("APPLIED tool_probe T" ~ tn ~ ": object '" ~ sec ~ "' not found") }
++  {% endif %}
++
++  # ---- input shaper (best effort) ----
++  {% if 'input_shaper' in printer %}
++    {% set ish = printer['input_shaper'] %}
++    { action_respond_info(
++      "APPLIED shaper: X=" ~ (ish.shaper_type_x|string) ~ "@" ~ (ish.shaper_freq_x|float|round(1)) ~
++      " damp=" ~ (ish.damping_ratio_x|float|round(3)) ~
++      " | Y=" ~ (ish.shaper_type_y|string) ~ "@" ~ (ish.shaper_freq_y|float|round(1)) ~
++      " damp=" ~ (ish.damping_ratio_y|float|round(3))
++    ) }
++  {% else %}
++    { action_respond_info("APPLIED shaper: cannot read (no 'input_shaper' object on this build). Use TC_LOAD_SHAPERS output as confirmation.") }
++  {% endif %}
++
++
++# =============================================================================
++#  ADXL axes_map guard (2026-10-04)
++# =============================================================================
++#  Every [adxl345 ...] must have an explicit axes_map. Nitehawk-36 boards here
++#  stand upright, so the default (x, y, z) silently measures the wrong axes:
++#  Y-axis shaper tests read mostly vertical vibration. Verify a new toolhead with
++#  AXES_MAP_CALIBRATION (uses the [resonance_tester] accel_chip) before shaping.
++[gcode_macro _REQUIRE_ADXL_AXES_MAP]
++description: Error (or warn with WARN_ONLY=1) if any [adxl345 ...] section has no axes_map
++gcode:
++    {% set missing = [] %}
++    {% for sec in printer.configfile.config %}
++        {% if (sec|lower).startswith('adxl345') and 'axes_map' not in printer.configfile.config[sec] %}
++            {% set _ = missing.append(sec) %}
+         {% endif %}
+     {% endfor %}
+-    {% if queue|length == 0 %}
+-        { err("No valid tools to process.") }
+-    {% elif tc.status != 'ready' %}
+-        { err("Cannot run, toolchangers status '" ~ tc.status ~ "' is not ready.") }
+-    {% elif cfg.toolchanger.on_axis_not_homed != 'home' and P.toolhead.homed_axes != 'xyz' %}
+-        { err('Please home all axis first.') }
+-    {% else %}
+-
+-        {% if P.toolhead.homed_axes != 'xyz' %}
+-            { msg('Homing first') }
+-            G28
++    {% if missing %}
++        {% set msg = "No axes_map on " ~ (missing|join(", ")) ~ ". Input shaper and drop detection would read the wrong axes. Nitehawk-36 here needs axes_map: -x, -z, -y (check with AXES_MAP_CALIBRATION)." %}
++        {% if params.WARN_ONLY|default(0)|int %}
++            RESPOND TYPE=error MSG="{msg}"
++        {% else %}
++            {action_raise_error("REFUSED: " ~ msg)}
+         {% endif %}
+-
+-        {% for tn in queue %}
+-            {% set name   = tc.tool_names[tn] %}
+-            {% set accel  = (P[name].get('params_accelerometer', 'adxl345 ' ~ name|replace('tool ', '')))|string %}
+-            {% set _ = tinfo.append([tn, accel, name]) %}
+-        {% endfor %}
+-
+-        {% for tn, accel, name in tinfo %}
+-            {% if accel|lower in cfg %} 
+-                { msg('Running calibration for ' ~ name|replace('tool ', '') ~ ' (accel: ' ~ accel ~ ')') }
+-                { ('T' ~ tn) if cur != tn else ''} 
+-                SHAPER_CALIBRATE CHIPS="{accel}"
+-                { ("SHOW_LATEST_SHAPER_PLOT PREFIX=plot_" ~ (name|replace('tool ', '')|lower)) if 'gcode_macro show_latest_shaper_plot' in cfg and show_images else '' }
+-                {% if save_to_svf %}    _TC_SHAPER_CALIBRATE_SAVE_TO_SVF NAME="{name|replace('tool ', '')}" {% endif %}
+-                {% if save_to_config %} _TC_SHAPER_CALIBRATE_SAVE_PARAMS NAME="{name|replace('tool ', '')}" {% endif %}
+-            {% else %} 
+-                { err("did not find a [" ~ accel ~ "] section.<br>(remember to either define your name in the tools 'params_accelerometer' or name them the same as your tools!)") }
+-            {% endif %}
+-        {% endfor %}
+-
+-    {% endif %}
+-
+-
+-[gcode_macro _TC_SHAPER_CALIBRATE_SAVE_TO_SVF]
+-gcode:
+-    {% set SELF = '_TC_SHAPER_CALIBRATE_SAVE_TO_SVF' %}
+-    
+-    {% macro msg(s, prefix_color="--v-accent-base", msg_color="--p-text-color2", extra='') %}
+-        {% set extra = ('\u0026\u0023\u0031\u0030\u003b' ~ extra) if extra else extra %}
+-        {% set desc = (printer.configfile.settings['gcode_macro ' ~ SELF|lower].description|trim).rstrip('"').lstrip('"') %}
+-        {% set pre  = "<span style=\"color: var(" ~ prefix_color ~ "); font-weight:bold;\" title=\"" ~ desc ~ "\">" ~ SELF ~ " </span>" %}
+-        { action_respond_info(pre ~ "<span style=\"color: var(" ~ msg_color ~ ");\" title=\"" ~ desc ~ extra ~ "\">" ~ s ~ "</span>") }
+-    {% endmacro %}
+-    {% macro err(s) %}{ msg(s, prefix_color="--v-error-base", msg_color="--v-warning-base") }{% endmacro %}
+-
+-    {% set pend = printer.configfile.save_config_pending_items.input_shaper or {} %}
+-    {% if pend == {} %}
+-        { err("No pending input_shaper data found.") }
+-    {% elif params.get('NAME','') == '' %}
+-        { err("Missing paramater [NAME]") }
+-    {% else %}
+-        # load existing
+-        {% set svf_key = 'shapers_' ~ params.NAME|lower %}
+-        {% set svf     = printer.save_variables.variables or {} %}
+-        {% set merged  = svf.get(svf_key, {'x': {}, 'y': {}}) %}
+-
+-        {% for ax in ['x', 'y'] %}
+-            {% set cur   = merged.get(ax, {}) %}
+-            {% set tkey  = 'shaper_type_' ~ ax %}
+-            {% set tval  = (pend.get(tkey, cur.get('type', defaults['type']))|string).upper() %}
+-            {% set is_sm = 'SMOOTH' in tval %}
+-
+-            {% set fkey  = ('smoother_freq_' if is_sm else 'shaper_freq_') ~ ax %}
+-            {% set fval  = pend.get(fkey, cur.get('freq', defaults['freq'])) %}
+-
+-            {% set dkey  = 'damping_ratio_' ~ ax %}
+-            {% set dval  = (pend.get(dkey, cur.get('damp', defaults['damp'])) if not is_sm) %}
+-
+-            {% set _ = cur.update({'type': tval, 'freq': fval|float}) %}
+-            {% set _ = cur.update({'damp': dval|float}) if not is_sm and dval %}
+-
+-            {% set _ = merged.update({ax: cur}) %}
+-        {% endfor %}
+-
+-        SAVE_VARIABLE VARIABLE={svf_key} VALUE="{merged}"
+-        { msg("Shaper values saved as '" ~ svf_key ~ "' in your svf", extra=merged|tojson|replace('\n', '\u0026\u0023\u0031\u0030\u003b')) }
+-    {% endif %}
+-
+-[gcode_macro SHOW_LATEST_SHAPER_PLOT]
+-gcode:
+-    # ------- parameter parsing into settings overwrite
+-    {% set settings = settings.copy() %}
+-    {% for p in params if p|lower in settings %}
+-        {% set _ = settings.update({p|lower: params[p]|int(params[p])}) %}
+-    {% endfor %}
+-
+-    {% set gbl     = printer.printer.__class__.__init__.__globals__ %}
+-    {% set imp_mod = gbl.importlib.import_module %}
+-    {% set sp      = imp_mod('subprocess') %}
+-    {% set bi      = imp_mod('builtins') %}
+-    {% set os      = imp_mod('os') %}
+-    {% set glob    = imp_mod('glob') %}
+-    {% set time    = imp_mod('time') %}
+-    {% set b64     = imp_mod('base64') %}
+-    {% set sys     = imp_mod('sys') %}
+-
+-    # ------- Main macro that runs
+-    {%- macro main() -%}
+-        {% set parts = [
+-            'Latest shaper plots (' ~ settings.axis ~ ')',
+-            '<div style="display:grid;grid-template-columns:1fr;gap:12px">'
+-        ] %}
+-        {%- for _ax in settings.axis|upper|list -%}
+-            {% set _ = parts.append('<div>' ~ axis_block(ax=_ax, **settings) ~ '</div>') %}
+-        {%- endfor -%}
+-        {%- set _ = parts.append('</div>') -%}
+-        { action_respond_info(parts|join|replace('\n','')) }
+-    {%- endmacro -%}
+-
+-    # ------- find the newest CSV that contains data in temp folder
+-    {%- macro newest_csv_for_axis(ax=None) -%}
+-        {%- set pats = {
+-            'X': ['/tmp/resonances_x_*.csv','/tmp/shaper*_x_*.csv','/tmp/calibration_data_x_*.csv'],
+-            'Y': ['/tmp/resonances_y_*.csv','/tmp/shaper*_y_*.csv','/tmp/calibration_data_y_*.csv']
+-        } -%}
+-        {%- set files = [] -%}
+-        {%- for pat in pats[ax] if ax -%}
+-            {%- for f in glob.glob(pat) -%}
+-                {%- set _ = files.append(f) -%}
+-            {%- endfor -%}
+-        {%- endfor -%}
+-        {%- set latest = bi.max(files, key=os.path.getmtime) if files|length > 0 else '' -%}
+-        {- dbg('csv[' ~ ax ~ ']: ' ~ (latest if latest else 'none') ~ ' (count=' ~ files|length ~ ')') -}
+-        {- latest -}
+-    {%- endmacro -%}
+-
+-    # ------- actual call to python, returns file path to png
+-    {%- macro render_path(save_path='', python_path='', script_path='', async=0, prefix='', ax=None, suffix='') -%}
+-        {%- set _, _ = vaargs, kwargs -%}
+-        {%- set csv = newest_csv_for_axis(ax) -%}
+-        {%- if not csv -%}
+-            {- dbg('render[' ~ ax ~ ']: no CSV → skip') -}
+-        {%- else -%}
+-            {%- set expand  = os.path.expanduser -%}
+-            {%- set py      = expand(python_path) -%}
+-            {%- set script  = expand(script_path) -%}
+-            {%- if not py or not os.path.exists(py) -%}
+-                {%- set py = sys.executable if os.path.exists(sys.executable) else '/usr/bin/python3' -%}
+-            {%- endif -%}
+-            {%- set sdir = expand(save_path) if save_path else '/tmp' -%}
+-            {%- set mk   = (os.makedirs(sdir, 511, True) if not os.path.exists(sdir) else None) -%}
+-            {%- set pfx  = (prefix ~ '_') if prefix and not prefix|list|last in [' ', '-', '_'] else prefix -%}
+-            {%- set sfx  = ('_' ~ suffix) if suffix and not suffix|list|first in [' ', '-', '_'] else suffix -%}
+-            {%- set base = (time.strftime(pfx ~ ax ~ sfx) ~ '.png')|lower -%}
+-            {%- set out  = os.path.join(sdir, base) -%}
+-            
+-            {%- set cmd  = ['nice', '-n', '19', py, script, csv, '-o', out] -%}
+-            {- dbg('cmd[' ~ ax ~ ']: ' ~ cmd|join(' ')) -}
+-
+-            {%- if async -%}
+-                {%- set _ = sp.Popen(cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL) -%}
+-                {- dbg('spawn[' ~ ax ~ ']: ' ~ out) -}
+-                {- out -}
+-            {%- else -%}
+-                {%- set res    = sp.run(cmd, stdout=sp.PIPE, stderr=sp.STDOUT) -%}
+-                {%- set outtxt = ((res.stdout or bi.bytes()) + (res.stderr or bi.bytes())).decode('utf-8', 'ignore') -%}
+-                {- dbg('sync[' ~ ax ~ ']: rc=' ~ res.returncode ~ ' exists=' ~ os.path.exists(out)) -}
+-                {- dbg(outtxt if outtxt else '(no output)') -}
+-                {- out if res.returncode|int == 0 and os.path.exists(out) else '' -}
+-            {%- endif -%}
+-        {%- endif -%}
+-    {%- endmacro -%}
+-
+-    # ------- converts the png to B64 or link so that HTML img knows where to look for it
+-    {%- macro show_plot(path='', async=0, img_serve='/server/files/') -%}
+-        {%- if not path -%}
+-            {- 'No plot rendered.' -}
+-        {%- else -%}
+-            {%- if async -%}
+-                {%- set rp  = os.path.realpath(path) -%}
+-                {%- set rel = rp.split('/printer_data/', 1)[1] if '/printer_data/' in rp -%}
+-                {%- set img = (os.path.join(img_serve, rel) ~ '?t=' ~ (time.time() * 1000)|int) if rel -%}
+-                {- dbg('preview(async): rel=' ~ (rel or 'n/a') ~ ' url=' ~ (img or 'n/a')) -}
+-            {%- else -%}
+-                {%- set data = bi.open(path, 'rb').read() -%}
+-                {%- set enc  = b64.b64encode(data) -%}
+-                {%- set img  = 'data:image/png;base64,' ~ enc.decode('ascii') -%}
+-                {- dbg('preview(sync): ' ~ path ~ ' bytes=' ~ data|length) -}
+-            {%- endif -%}
+-            {%- if img -%}
+-                {- img_click_open(src=img, async=async, **kwargs) -}
+-            {%- else -%}
+-                {- 'Preview not available.' -}
+-            {%- endif -%}
+-        {%- endif -%}
+-    {%- endmacro -%}
+-
+-    # ------- axis wrapper, kicks off render etc
+-    {%- macro axis_block(ax, async=0) -%}
+-        {- dbg('axis_block[' ~ ax ~ ']: async=' ~ async) -}
+-        {%- set path = render_path(ax=ax, async=async, **kwargs) -%}
+-        {- dbg('path[' ~ ax ~ ']: ' ~ (path if path else '')) -}
+-        {%- if not path -%}
+-            { 'No ' ~ ax ~ '-axis CSV found in /tmp or render failed.' }
+-        {%- else -%}
+-            {%- set html = show_plot(path=path, async=async, img_title=(ax ~ '-axis shaper plot'), **kwargs) -%}
+-            {%- if async -%}
+-                {- html ~ 'Rendering in background → ' ~ path -}
+-            {%- else -%}
+-                {- html ~ ('Saved: ' ~ path) if kwargs.get('save_path') else '' -}
+-            {%- endif -%}
+-        {%- endif -%}
+-    {%- endmacro -%}
+-
+-    # ------- image wrapper so its openable in full size
+-    {%- macro img_click_open(src, async=0, max_px=400, img_title='Click to open full-size', open_size_percent=75) -%}
+-        {%- set _, _ = vaargs, kwargs -%}
+-        {%- set zoom_factor = [[open_size_percent|int, 100]|min, 10]|max / 100.0 -%}
+-        {%- set sanitized_src_id = 'plot-container-' ~ src.split('?')[0]|replace('/','-')|replace('.','-')|replace(':','-') -%}
+-        {%- set out =
+-            '<div id="' ~ sanitized_src_id ~ '" data-zoom="' ~ zoom_factor ~ '" style="max-inline-size:' ~ max_px ~ 'px;inline-size:100%;cursor:zoom-in;">' ~
+-            '<div class="img_box" style="inline-size:100%;background:var(--p-background-darker);border-radius:4px;">' ~
+-                (
+-                '<img data-main src="' ~ src ~ '" alt="' ~ img_title ~ '" draggable="false" ' ~
+-                'style="display:block;inline-size:100%;block-size:auto;object-fit:contain;" ' ~
+-                'onload="(function(i){i.style.aspectRatio=i.naturalWidth+\' / \'+i.naturalHeight;})(this)">' 
+-                if not async else
+-                '<div class="plot-placeholder" style="display:flex;align-items:center;justify-content:center;min-height:80px;padding:12px;font-size:90%;color:var(--v-text-darken1);">Generating Plot...</div>' ~
+-                '<img data-main alt="' ~ img_title ~ '" draggable="false" style="display:none;inline-size:100%;block-size:auto;object-fit:contain;">'
+-                ) ~
+-            '</div>' ~
+-            '</div>' ~
+-            '<img src="x" style="display:none" data-container-id="' ~ sanitized_src_id ~ '" data-url="' ~ src.split('?')[0] ~ 
+-            '" onerror="(function(el){try{var box=document.getElementById(el.dataset.containerId);if(!box||box.dataset.init){el.remove();return;}box.dataset.init=\'1\';var url=el.dataset.url;var ph=box.querySelector(\'.plot-placeholder\');var img=box.querySelector(\'img[data-main]\');var tries=0,max=90;function fitScale(nw,nh,z){var w=window.innerWidth,h=window.innerHeight;var k=Math.min((w*z)/nw,(h*z)/nh);return k>0?k:1}function openOverlay(pic){var nw=pic.naturalWidth,nh=pic.naturalHeight;var ov=document.createElement(\'div\');ov.setAttribute(\'style\',\'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;cursor:zoom-out;overflow:hidden\');var panel=document.createElement(\'div\');panel.setAttribute(\'style\',\'position:absolute;left:0;top:0;transform-origin:0 0;cursor:auto\');var big=document.createElement(\'img\');big.draggable=false;big.src=pic.currentSrc||pic.src;big.setAttribute(\'style\',\'display:block;max-width:none;max-height:none;user-select:none;-webkit-user-drag:none\');panel.appendChild(big);ov.appendChild(panel);document.body.appendChild(ov);var z=parseFloat(box.dataset.zoom)||0.75;var k=fitScale(nw,nh,z),kmin=0.02,kmax=50,tx=Math.floor((window.innerWidth-nw*k)/2),ty=Math.floor((window.innerHeight-nh*k)/2);function apply(){panel.style.transform=\'translate(\'+tx+\'px,\'+ty+\'px) scale(\'+k+\')\';panel.style.width=nw+\'px\';panel.style.height=nh+\'px\';}apply();var drag=false,lx=0,ly=0;panel.addEventListener(\'mousedown\',function(e){if(e.button===0){drag=true;lx=e.clientX;ly=e.clientY;panel.style.cursor=\'grabbing\';e.preventDefault();}});window.addEventListener(\'mouseup\',function(){if(drag){drag=false;panel.style.cursor=\'auto\';}});window.addEventListener(\'mousemove\',function(e){if(!drag)return;var dx=e.clientX-lx,dy=e.clientY-ly;lx=e.clientX;ly=e.clientY;tx+=dx;ty+=dy;apply();});panel.addEventListener(\'wheel\',function(e){e.preventDefault();var r=panel.getBoundingClientRect();var mx=e.clientX,my=e.clientY;var u=(mx-r.left)/k,v=(my-r.top)/k;var step=e.ctrlKey?0.15:0.08;var f=e.deltaY<0?(1+step):(1-step);if(!(f>0))f=1;var k2=Math.min(Math.max(k*f,kmin),kmax);var tx2=Math.round(mx-u*k2),ty2=Math.round(my-v*k2);k=k2;tx=tx2;ty=ty2;apply();},{passive:false});function onRes(){var mx=window.innerWidth/2,my=window.innerHeight/2;var r=panel.getBoundingClientRect();var u=(mx-r.left)/k,v=(my-r.top)/k;var k2=fitScale(nw,nh,z);var tx2=Math.round(mx-u*k2),ty2=Math.round(my-v*k2);k=k2;tx=tx2;ty=ty2;apply();}function onKey(e){if(e&&e.key===\'Escape\')close();}function close(){window.removeEventListener(\'resize\',onRes);document.removeEventListener(\'keydown\',onKey);if(ov.parentNode)ov.parentNode.removeChild(ov);}ov.addEventListener(\'click\',function(){close();});panel.addEventListener(\'click\',function(e){e.stopPropagation();});window.addEventListener(\'resize\',onRes);document.addEventListener(\'keydown\',onKey);}function bindClick(){if(box.dataset.zoomReady)return;box.dataset.zoomReady=\'1\';box.addEventListener(\'click\',function(){var pic=box.querySelector(\'img[data-main]\');if(pic&&pic.complete&&pic.naturalWidth)openOverlay(pic);});}function poll(){tries++;var bust=Date.now();var probe=new Image();probe.onload=function(){img.src=url+\'?t=\'+bust;img.style.display=\'block\';if(ph)ph.style.display=\'none\';img.onload=function(){img.style.aspectRatio=img.naturalWidth+\' / \'+img.naturalHeight;};bindClick();};probe.onerror=function(){if(tries<max){setTimeout(poll,400+Math.min(tries*120,2000));}else{if(ph)ph.textContent=\'Failed to load plot.\';}};probe.src=url+\'?t=\'+bust;}poll();}catch(e){}finally{el.remove();}})(this)">' -%}
+-        {- out|replace('\n','') -}
+-    {%- endmacro -%}
+-
+-    # ------- dbug/log output
+-    {% set _dbg = [] %}
+-    {%- macro dbg(msg) -%}{%- set _ = _dbg.append('<p>' ~ msg|replace('\n', '<br>') ~ '</p>') if verbose -%}{%- endmacro -%}
+-    
+-    { main() }
+-
+-    {%- set block -%}
+-        <details>
+-            <summary style="cursor:pointer; color:var(--v-accent-base); margin:6px 0 3px 0;"><span class="text--primary">Log</span></summary>
+-            <blockquote class="accent--text text--lighten-1"
+-                        style="display:inline-block; width:fit-content; max-width:90%;
+-                                margin-top:0.6em; white-space:pre-wrap;
+-                                overflow-wrap:anywhere; word-break:break-word;
+-                                padding:0.5em 0.75em; border-left:3px solid currentColor;
+-                                background:var(--p-background-darker, rgba(255,255,255,0.06)); line-height:1.25em; font-size:75%;">
+-                <span class="text--primary">{_dbg|join()}</span>
+-            </blockquote>
+-        </details>
+-    {%- endset -%}
+-    { action_respond_info(block|replace('\n', '')) if _dbg else '' }
+-
+-
+-    
+-[gcode_macro _TC_SHAPER_CALIBRATE_SAVE_PARAMS]
+-description: "Save pending input_shaper values into the active / selected tool's parameters and clear the pending block."
+-variable_default_type: "MZV"
+-variable_default_freq: 0
+-variable_default_damp: 0.1
+-gcode:
+-  {% set cf   = printer.configfile %}
+-  {% set pend = cf.save_config_pending_items.get('input_shaper', {}) %}
+-  {% set P   = printer %}
+-  {% set tool = P[P.toolchanger.tool_names[P.toolchanger.tool_number]] %}
+-  {% if pend == {} %}
+-    RESPOND TYPE=error MSG="No pending input_shaper data found."
+-  {% else %}
+-    # --------< helper
+-    {% macro set_and_save(param, value) -%}
+-      SET_TOOL_PARAMETER  {rawparams} PARAMETER={param} VALUE={value}
+-      SAVE_TOOL_PARAMETER {rawparams} PARAMETER={param}
+-    {%- endmacro %}
+-
+-    # --------< grab all from staged save
+-    {% for ax in ['x', 'y'] %}
+-      {% set type_val = (pend.get('shaper_type_' ~ ax,  default_type))|string|upper %}
+-      {% set freq_val = (pend.get('shaper_freq_' ~ ax,  default_freq))|string %}
+-      {% set damp_val = (tool.get('params_input_shaper_damping_ratio_' ~ ax, default_damp))|string %} # get from tool or default... (not in pending...)
+-      # --------< use small helper to save.
+-      {set_and_save('params_input_shaper_type_' ~           ax, type_val)}
+-      {set_and_save('params_input_shaper_freq_' ~           ax, freq_val)}
+-      {set_and_save('params_input_shaper_damping_ratio_' ~  ax, damp_val)}
+-    {% endfor %}
+-    RESPOND MSG="input_shaper parameters for {tool.name|replace('tool ', '')} staged for SAVE_CONFIG."
+-  {% endif %}
++    {% endif %}
++
++[delayed_gcode _CHECK_ADXL_AXES_MAP_STARTUP]
++initial_duration: 6
++gcode:
++    _REQUIRE_ADXL_AXES_MAP WARN_ONLY=1
++

@@ -1,0 +1,7 @@
+# <kind>/<preset name> -- presets currently used on the Boss
+machine/TC 26.10.04
+process/TC 26.10.09 ABS
+filament/TC ASA 26.10.09
+filament/TC ABS 26.10.09
+filament/TC PETG SUPPORT
+filament/TC PLA 26.09.14

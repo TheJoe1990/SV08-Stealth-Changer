@@ -1,0 +1,622 @@
+--- upstream/files-used/config/printer.cfg @ 2b6416e
++++ config/printer.cfg
+@@ -1,47 +1,80 @@
++[respond]
++[save_babies]
++[tool_drop_detection]
++
++
+ [include mainsail.cfg]
++[include KOMB.cfg]
++[include nest.cfg]
+ [include sovol-macros.cfg]
++# Enable arcs support
++[gcode_arcs]
++[include Toolchanger.cfg]
++[include encoder_toolchange_grace.cfg]   # 2026-10-05 encoder ignores runouts for 2 s after each tool pickup
++#[include T0.cfg]
++#[include T5.cfg]
+ [include timelapse.cfg] # DONT FORGET TO INSTALL THE TIMELAPSE PLUGIN
+-
+-# PLEASE UNCOMMENT THE FILE THAT BEST FITS YOUR CONFIGURATION
+-# DON'T NEED OR WANT TO USE SOMETHING, DON'T USE (UNCOMMENT) IT
+-
+-# Configs and menu for the stock lcd screen.
++[include KAMP_Settings.cfg] 
++[include shaketune.cfg]
++[include QGL_Finder.cfg]
++[include heatsoak.cfg]
++[include maybe_dead_tracker.cfg]   # 2026-10-03: usage tracker for possibly-dead macros
++
++
++# IF YOU ARE USING THE SCREEN THAT COMES WITH THE SV08
+ [include options/lcd/*.cfg]
+ 
+-# If you are using the stock probe, keep the following lines as-is.
+-# If you have an Eddy probe, comment the stock probe and uncomment the eddy, then go read options/probe/eddy.cfg. 
+-# Also, when using eddy, comment out/remove the [probe] section here in the printer.cfg (don't forget the bottom 'SAVE_CONFIG' block)
+-# Also, when using Sovol eddy, comment out/remove the [probe] section and adjust [quad_gantry_level] section here in the printer.cfg (don't forget the bottom 'SAVE_CONFIG' block)
+-# Sovol eddy probe config requires eddy-ng, you will have to modify macros yourself according to eddy-ng instalation guide
+-[include options/probe/stock.cfg] # Stock probe, default
+-#[include options/probe/eddy.cfg] # BTT Eddy probe
+-#[include options/probe/eddy-sovol.cfg] # Sovol eddy probe 
+-
+-# Want to use a thermistor in your enclosure? You can use a RPi Pico with a BME280.
+-# Read the guide at /pico-thermistor/ on how to do this. Once ready you can uncomment the cfg below.
+-#[include options/thermistor/pico.cfg
+-
+-[mcu]
+-serial: /dev/serial/by-id/usb-Klipper_stm32f103xe_
++# IF YOU HAVE KLIPPERSCREEN / AN HDMI DISPLAY ATTACHED TO YOUR PRINTER
++# [include options/hdmi/*.cfg]
++
++# I like to make a symlink from the tapchanger repo to tapchanger in the
++# config directory so I include them like this.
++[include toolchanger/macros.cfg]
++[include toolchanger/homing.cfg] # might need to modify, assumes sensorless
++[include toolchanger/tool_detection.cfg]
++[include toolchanger/toolchanger.cfg]
++[include toolchanger/tools_calibrate.cfg]
++[include toolchanger/toolhead_-100.cfg]
++[include toolchanger/toolhead_0.cfg]
++[include toolchanger/toolhead_1.cfg]
++[include toolchanger/toolhead_2.cfg]
++[include toolchanger/toolhead_3.cfg]   # added 2026-10-03, Nitehawk-36 (USB), built from T1
++
++
++[resonance_tester]
++accel_chip: adxl345 T0
++probe_points: 175,175,20
++sweeping_accel: 400
++sweeping_period: 0
++
++[delayed_gcode led_update]
++gcode:
++    UPDATE_LEDS
++
++[rounded_path]
++resolution: 1.0
++replace_g0: False  # Set to True if you want to replace all G0 with ROUNDED_G0 automatically
++
++
++[mcu]      
++serial: /dev/serial/by-id/usb-Klipper_stm32f103xe_32FFDD054747363042700257-if00
+ restart_method: command     
+-
+-[mcu extra_mcu]
+-serial: /dev/serial/by-id/usb-Klipper_stm32f103xe_
+-restart_method: command      
+-
++ 
+ [virtual_sdcard]
+ path: ~/printer_data/gcodes
+-on_error_gcode: CANCEL_PRINT
++on_error_gcode: RESPOND TYPE=error MSG="GCODE ERROR — execution halted in place"
++
+ 
+ [printer]
+ kinematics: corexy           
+-max_velocity: 700            
+-max_accel: 40000             
+-#max_accel_to_decel: 10000 # deprecated
++#max_velocity: 700            
++#max_accel: 40000             
++max_velocity: 500            
++max_accel: 10000       
+ minimum_cruise_ratio: 0.5
+-max_z_velocity: 20           
+-max_z_accel: 500             
+-square_corner_velocity: 5.0 
++max_z_velocity: 80 #50            
++max_z_accel: 1000 #1000 #500             
++square_corner_velocity: 30.0 
+ 
+ [stepper_x]
+ step_pin: PE2
+@@ -51,35 +84,37 @@
+ microsteps: 16                
+ full_steps_per_rotation:200   
+ endstop_pin: tmc2209_stepper_x: virtual_endstop              
+-position_min: 0               
+-position_endstop: 355         
+-position_max: 355             
+-homing_speed: 30              
++position_min: -6               
++position_endstop: 360         
++position_max: 360             
++homing_speed: 60 #30              
+ homing_retract_dist: 0        
+-homing_positive_dir: True     
++homing_positive_dir: True 
+ #--------------------------------------------------------------------
+ [tmc2209 stepper_x]
+ uart_pin: PE1
+ interpolate: True             
+-run_current: 1.1              
++run_current: 1.1             
+ #hold_current: 1.2             
+ sense_resistor: 0.150         
+ stealthchop_threshold: 0      
+ uart_address:3
+-driver_sgthrs: 70
++# 2025-12-27 (tmc_autotune) moved to [autotune_tmc stepper_x] as sg4_thrs
++#driver_sgthrs: 70
+ diag_pin: PE15
+ 
+ [stepper_y]
+ step_pin: PB8
+-dir_pin: !PB6
++dir_pin: PB6
+ enable_pin: !PB9
+ rotation_distance: 40         
+ microsteps: 16                
+ full_steps_per_rotation:200   
+-endstop_pin: tmc2209_stepper_y: virtual_endstop              
++#endstop_pin: tmc2209_stepper_y: virtual_endstop
++endstop_pin: !PE13
+ position_min: 0               
+-position_endstop: 364         
+-position_max: 364            
++position_endstop: 365         
++position_max: 365            
+ homing_speed: 30              
+ homing_retract_dist: 0        
+ homing_positive_dir: true     
+@@ -93,7 +128,7 @@
+ stealthchop_threshold: 0      
+ uart_address:3
+ driver_sgthrs: 70
+-diag_pin: PE13 
++#diag_pin: PE13 
+ 
+ [stepper_z] #motherboard：Z3 
+ step_pin:PC0    
+@@ -104,7 +139,7 @@
+ microsteps: 16                
+ endstop_pin: probe:z_virtual_endstop           
+ position_max: 347             
+-position_min: -5              
++position_min: -25              
+ #position_endstop: 0
+ homing_speed: 15.0
+ homing_retract_dist: 5.0
+@@ -113,11 +148,11 @@
+ 
+ [tmc2209 stepper_z]
+ uart_pin: PE6 
+-interpolate: true             
+-run_current: 0.55           
++interpolate: FALSE             
++run_current: 0.65   # bumped from 0.3455 2026-09-14 for more Z torque, rated max is 0.8A per motor_constants below
+ #hold_current: 0.58         
+ sense_resistor: 0.150         
+-stealthchop_threshold: 999999 
++stealthchop_threshold: 0 
+ uart_address:3
+ 
+ [stepper_z1] ##motherboard：Z1
+@@ -130,11 +165,11 @@
+ 
+ [tmc2209 stepper_z1]
+ uart_pin:PD2  
+-interpolate: true             
+-run_current:  0.55          
++interpolate: FALSE            
++run_current: 0.65   # bumped from 0.3455 2026-09-14 for more Z torque, rated max is 0.8A per motor_constants below
+ #hold_current: 0.58           
+ sense_resistor: 0.150         
+-stealthchop_threshold: 999999 
++stealthchop_threshold: 0 
+ uart_address:3
+ 
+ [stepper_z2] ##motherboard：Z2
+@@ -147,11 +182,11 @@
+ 
+ [tmc2209 stepper_z2]
+ uart_pin:PD6  
+-interpolate: true             
+-run_current: 0.55            
++interpolate: FALSE             
++run_current: 0.65   # bumped from 0.3455 2026-09-14 for more Z torque, rated max is 0.8A per motor_constants below
+ #hold_current: 0.58           
+ sense_resistor: 0.150         
+-stealthchop_threshold: 999999 
++stealthchop_threshold: 0 
+ uart_address:3
+ 
+ [stepper_z3] ##motherboard：Z4
+@@ -164,12 +199,27 @@
+ 
+ [tmc2209 stepper_z3]
+ uart_pin:PD10    
+-interpolate: true            
+-run_current: 0.55         
++interpolate: FALSE          
++run_current: 0.65   # bumped from 0.3455 2026-09-14 for more Z torque, rated max is 0.8A per motor_constants below
+ #hold_current: 0.58           
+ sense_resistor: 0.150         
+ uart_address:3
+-stealthchop_threshold: 999999 
++stealthchop_threshold: 0
++
++[bed_mesh]
++speed: 500
++horizontal_move_z: 5
++mesh_min: 5,0
++mesh_max: 350,325
++probe_count: 9,9
++algorithm: bicubic
++bicubic_tension: 0.4
++split_delta_z: 0.016
++mesh_pps:3,3
++adaptive_margin: 5
++fade_start: 0
++fade_end: 10
++fade_target: 0
+ 
+ [thermistor my_thermistor_e]
+ temperature1:25
+@@ -179,50 +229,11 @@
+ temperature3:220
+ resistance3:435
+ 
+-[extruder]
+-step_pin: extra_mcu:PA8   
+-dir_pin: extra_mcu:PB8    
+-enable_pin:!extra_mcu: PB11   
+-rotation_distance: 6.5 
+-microsteps: 16                
+-full_steps_per_rotation: 200 
+-nozzle_diameter: 0.400        
+-filament_diameter: 1.75  
+-max_extrude_only_distance: 150     
+-heater_pin:extra_mcu:PB9  
+-sensor_type:my_thermistor_e  
+-pullup_resistor: 11500
+-sensor_pin: extra_mcu:PA5  
+-min_temp: 5                  
+-max_temp: 305                 
+-max_power: 1.0                
+-min_extrude_temp: 5
+-control : pid
+-pid_kp : 33.838
+-pid_ki : 5.223
+-pid_kd : 47.752
+-pressure_advance: 0.025       
+-pressure_advance_smooth_time: 0.035    
+-
+-[tmc2209 extruder]
+-uart_pin: extra_mcu:PB10  
+-interpolate: True             
+-run_current: 0.8           
+-#hold_current: 0.75             
+-uart_address:3
+-sense_resistor: 0.150          
+-
+-[verify_heater extruder]      
+-max_error: 120                
+-check_gain_time:30           
+-hysteresis: 5                
+-heating_gain: 2               
+-
+-[filament_switch_sensor filament_sensor]
+-pause_on_runout: True
+-event_delay: 3.0
+-pause_delay: 0.5
+-switch_pin: PE9
++#[filament_switch_sensor filament_sensor]
++#pause_on_runout: False
++#event_delay: 3.0
++#pause_delay: 0.5
++#switch_pin: PE9
+ 
+ [thermistor my_thermistor]
+ temperature1:25
+@@ -239,10 +250,6 @@
+ max_power: 1.0               
+ min_temp: 5                  
+ max_temp: 105                
+-control : pid
+-pid_kp : 73.571
+-pid_ki : 1.820
+-pid_kd : 783.849
+ 
+ [verify_heater heater_bed]      
+ max_error: 120                
+@@ -250,138 +257,191 @@
+ hysteresis: 5                
+ heating_gain: 2 
+ 
+-# PLEASE REMOVE THIS WHEN USING EDDY
+-[probe]
+-z_offset: 0
+-
+-[probe_pressure]
+-pin: ^!PE12     
+-x_offset: 0                  
+-y_offset: 0
+-z_offset : 0
+-speed: 1.0
+-
+ [quad_gantry_level]          
+ gantry_corners:              
+-	-60,-10
+-	410,420
++	-70,-27
++	416,484
+ points:
+-	36,10
+-	36,320
+-	346,320
+-	346,10
++	40,40
++	40,310
++	310,310
++	310,40
+ speed: 400                   
+-horizontal_move_z: 10       # set to 5 for Sovol eddy probe
++horizontal_move_z: 10       
+ retry_tolerance: 0.05      
+ retries: 5                  
+-max_adjust: 30   # set to 10 for Sovol eddy probe
+-
+-[multi_pin print_cooling_fan_pins]
+-pins: extra_mcu:PA7, extra_mcu:PB1
+-
+-# print/part cooling fan
+-[fan]
+-pin: multi_pin:print_cooling_fan_pins
+-max_power: 1.0
++max_adjust: 30   
+ 
+ [fan_generic exhaust_fan] # exhaust fan
+ pin: PA2
+ max_power: 1.0
+ 
+-# MCU fan, aka noisy boi, is now only enabled when using steppers, extruder, heatbed; 5min timeout
+-[controller_fan MCU_fan]
++[temperature_fan mcu_fan]
+ pin: PA1
+-max_power: 1
+ kick_start_time: 0.5
+-fan_speed: 1
+-idle_timeout: 300
+-heater: extruder, heater_bed
+-stepper: stepper_x, stepper_y
+-
+-# Want your fan (host) temperature controlled? Uncomment the next section and comment out the above section, derived from: https://www.reddit.com/r/Sovol/comments/1cqntzu/first_mod_on_my_sv08_noctua_fan_for_the/
+-# WARNING: Do you have a Noctua 24V 4010 fan (eg. NF-A4x10 24V PWM)? Then this will not work and results in a non-spinning fan.
+-# In that case you can either use the above 'controller_fan' section or use 'control: watermark' and leave the pid entries commented out.
+-#[temperature_fan MCU_fan]
+-#pin: PA1
+-#kick_start_time: 0.5
+-#max_power: 1.0
+-#min_temp: 0
+-#max_temp: 90
+-#hardware_pwm: true
+-#target_temp: 50
+-#sensor_type: temperature_host # please comment out or remove the [temperature_sensor Host_temp] section if you don't want the temperature shown twice in the interface.
+-#max_speed: 1.0
+-#min_speed: 0.1
+-#control: pid
+-#pid_Kp: 2.0     ;40
+-#pid_Ki: 5.0     ;0.2
+-#pid_Kd: 0.5     ;0.1
+-#pid_deriv_time: 2.0
+-#control: watermark # use this control if pid control does not work for your fan
+-
+-[heater_fan hotend_fan]      
+-pin: extra_mcu:PA6   
+-max_power: 1.0               
+-kick_start_time: 0.5         
+-heater: extruder             
+-heater_temp: 50              
+-tachometer_pin:extra_mcu:PA1
+-tachometer_ppr: 1
+-tachometer_poll_interval: 0.0013
++max_power: 1.0
++min_temp: 0
++max_temp: 90
++target_temp: 45
++sensor_type: temperature_host
++max_speed: 1.0
++min_speed: 0.3
++control: pid
++pid_Kp: 40.0
++pid_Ki: 0.2
++pid_Kd: 0.1
++pid_deriv_time: 2.0
++
++
+ 
+ [gcode_arcs]                       
+ resolution: 1.0                    
+ 
+-# Defined as an LED for ease of control
+-[led main_led]
+-white_pin:PA3
+-cycle_time: 0.010
+-hardware_pwm: False
+-initial_WHITE: 1.0
+-
+ [idle_timeout]
+ gcode: _IDLE_TIMEOUT
+-timeout: 600
+-
++timeout: 6000
+ 
+ [temperature_sensor mcu_temp]         
+ sensor_type: temperature_mcu
+ min_temp:0
+ max_temp:100
+ 
+-[temperature_sensor Host_temp]     
+-sensor_type: temperature_host
+-min_temp: 0
+-max_temp: 110
+-
+-[temperature_sensor Toolhead_Temp]
+-sensor_type: temperature_mcu
+-sensor_mcu: extra_mcu
++#[temperature_sensor Host_temp]     
++#sensor_type: temperature_host
++#min_temp: 0
++#max_temp: 110
+ 
+ [pause_resume]
+ 
+ [exclude_object]
+-
+-#[adxl345]
+-#cs_pin:extra_mcu:PB12
+-
+-#[resonance_tester]
+-#accel_chip: adxl345
+-#probe_points:
+-#    175, 175, 30  # an example175 Y175 Z30
+-#accel_per_hz:50
+-#min_freq:1
+-#max_freq:100
+-#max_smoothing:0.2
+-#hz_per_sec:0.5
+-
+-[input_shaper]
+-damping_ratio_x: 0.001
+-damping_ratio_y: 0.001
+-shaper_type_x = mzv
+-shaper_freq_x = 35
+-shaper_type_y = mzv
+-shaper_freq_y = 35
+-
++[auto_speed]
++axis: diag_x, diag_y, z  ; One or multiple of `x`, `y`, `diag_x`, `diag_y`, `z`
++
++#margin: 20            ; How far away from your axes to perform movements
++
++#settling_home: 1      ; Perform settling home before starting Auto Speed
++max_missed: 10.0       ; Maximum full steps that can be missed
++#endstop_samples: 3    ; How many endstop samples to take for endstop variance
++
++#accel_min: 1000.0     ; Minimum acceleration test may try
++accel_max: 5000.0    ; Maximum acceleration test may try
++#accel_accu: 0.05      ; Keep binary searching until the result is within this percentage
++
++#velocity_min: 50.0    ; Minimum velocity test may try
++#velocity_max: 5000.0  ; Maximum velocity test may try
++#velocity_accu: 0.05   ; Keep binary searching until the result is within this percentage
++
++#derate: 0.8           ; Derate discovered results by this amount
++
++#validate_margin: Unset      ; Margin for VALIDATE, Defaults to margin
++#validate_inner_margin: 20.0 ; Margin for VALIDATE inner pattern
++#validate_iterations: 50     ; Perform VALIDATE pattern this many times
++
++#results_dir: ~/printer_data/config ; Destination directory for graphs
++
++[include tool_mapping.cfg]
++[include tool_reassign.cfg]   # 2026-10-12: TC_MAP tool map + manual endless spool
++[include spoolman.cfg]   # 2026-10-04: per-tool Spoolman tracking
++#[include variables.cfg]
+ [save_variables]
+-filename = ~/printer_data/config/saved_variables.cfg
++filename: /home/biqu/printer_data/config/variables.cfg
++
++
++#####################################################################
++# 2025-12-27 — klipper_tmc_autotune (SV08 motor constants + enable)
++#####################################################################
++
++# SV08 Z motor: 42BYGH1603-A-20DNT
++[motor_constants sv08_z_42bygh1603]
++resistance: 6.0
++inductance: 0.0087
++holding_torque: 0.28
++max_current: 0.8
++steps_per_revolution: 200
++
++# SV08 XY motor: 42BYGH2904-A-24NQ1
++[motor_constants sv08_xy_42bygh2904]
++resistance: 1.0
++inductance: 0.0020
++holding_torque: 0.42
++max_current: 1.5
++steps_per_revolution: 200
++
++# Enable autotune per axis
++[autotune_tmc stepper_x]
++motor: sv08_xy_42bygh2904
++# 2025-12-27 sensorless homing threshold moved here (TMC2209 uses sg4_thrs)
++sg4_thrs: 100
++
++[autotune_tmc stepper_y]
++motor: sv08_xy_42bygh2904
++
++[autotune_tmc stepper_z]
++motor: sv08_z_42bygh1603
++tuning_goal: performance
++
++[autotune_tmc stepper_z1]
++motor: sv08_z_42bygh1603
++tuning_goal: performance
++
++[autotune_tmc stepper_z2]
++motor: sv08_z_42bygh1603
++tuning_goal: performance
++
++[autotune_tmc stepper_z3]
++motor: sv08_z_42bygh1603
++tuning_goal: performance
++
++#*# <---------------------- SAVE_CONFIG ---------------------->
++#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
++#*#
++#*# [tool_probe T0]
++#*# z_offset = -1.020
++#*#
++#*# [extruder]
++#*# control = pid
++#*# pid_kp = 28.600
++#*# pid_ki = 2.804
++#*# pid_kd = 72.934
++#*#
++#*# [extruder1]
++#*# control = pid
++#*# pid_kp = 26.363
++#*# pid_ki = 3.030
++#*# pid_kd = 57.341
++#*#
++#*# [extruder2]
++#*# control = pid
++#*# pid_kp = 35.711
++#*# pid_ki = 4.668
++#*# pid_kd = 68.300
++#*#
++#*# [extruder3]
++#*# control = pid
++#*# pid_kp = 33.106
++#*# pid_ki = 4.087
++#*# pid_kd = 67.044
++#*#
++#*# [heater_bed]
++#*# control = pid
++#*# pid_kp = 71.101
++#*# pid_ki = 1.596
++#*# pid_kd = 791.892
++#*#
++#*# [bed_mesh default]
++#*# version = 1
++#*# points =
++#*# 	1.061484, 1.033359, 1.029609, 1.052109
++#*# 	1.112109, 1.052109, 1.020234, 1.067109
++#*# 	1.145859, 1.082109, 1.057734, 1.074609
++#*# 	1.089609, 1.048359, 1.042734, 1.267734
++#*# x_count = 4
++#*# y_count = 4
++#*# mesh_x_pps = 3
++#*# mesh_y_pps = 3
++#*# algo = lagrange
++#*# tension = 0.4
++#*# min_x = 126.24799999999999
++#*# max_x = 228.338
++#*# min_y = 95.38680000000001
++#*# max_y = 211.4568

@@ -1,0 +1,16 @@
+{
+    "compatible_printers": [
+        "MyKlipper 0.4 nozzle"
+    ],
+    "filament_is_support": [
+        "1"
+    ],
+    "filament_settings_id": [
+        "TC PETG SUPPORT"
+    ],
+    "from": "User",
+    "inherits": "Generic PETG @System",
+    "is_custom_defined": "0",
+    "name": "TC PETG SUPPORT",
+    "version": "2.3.1.10"
+}

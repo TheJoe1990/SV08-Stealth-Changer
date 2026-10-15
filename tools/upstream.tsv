@@ -1,0 +1,30 @@
+# Where each config file came from. Used by tools/sync.py to regenerate upstream-diffs/.
+# boss_file	repo_url	commit	upstream_path	note
+printer.cfg	https://github.com/Rappetor/Sovol-SV08-Mainline	2b6416e	files-used/config/printer.cfg	SV08 mainline-Klipper base; heavily extended for the toolchanger
+sovol-macros.cfg	https://github.com/Rappetor/Sovol-SV08-Mainline	2b6416e	files-used/config/sovol-macros.cfg	start/end/pause/resume/cancel rewritten for the toolchanger
+options/lcd/lcd.cfg	https://github.com/Rappetor/Sovol-SV08-Mainline	2b6416e	files-used/config/options/lcd/lcd.cfg	stock SV08 screen
+options/lcd/macros.cfg	https://github.com/Rappetor/Sovol-SV08-Mainline	2b6416e	files-used/config/options/lcd/macros.cfg	stock SV08 screen
+options/lcd/sovol-menu.cfg	https://github.com/Rappetor/Sovol-SV08-Mainline	2b6416e	files-used/config/options/lcd/sovol-menu.cfg	stock SV08 screen
+options/probe/eddy.cfg	https://github.com/Rappetor/Sovol-SV08-Mainline	2b6416e	files-used/config/options/probe/eddy.cfg	not used (probe = per-tool TAP)
+options/probe/stock.cfg	https://github.com/Rappetor/Sovol-SV08-Mainline	2b6416e	files-used/config/options/probe/stock.cfg	not used (probe = per-tool TAP)
+KAMP_Settings.cfg	https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging	997838c	Configuration/KAMP_Settings.cfg	KAMP settings
+KAMP_Line_Purge_TC.cfg	https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging	997838c	Configuration/Line_Purge.cfg	ignores the PRIME_TOWER_AREA object
+KAMP_Smart_Park_TC.cfg	https://github.com/kyleisah/Klipper-Adaptive-Meshing-Purging	997838c	Configuration/Smart_Park.cfg	ignores the PRIME_TOWER_AREA object
+KOMB.cfg	https://github.com/TmRxJD/KOMB	d39a8bd	KOMB.cfg	nozzle brush; made toolchanger-aware (active tool heater)
+_KOMB_Variables.cfg	https://github.com/TmRxJD/KOMB	d39a8bd	_KOMB_Variables.cfg	brush position/size for the SV08 brush
+toolchanger/toolchanger.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	examples/dock location/fixed/toolchanger-error-handling.cfg	pickup/dropoff paths, error handling, heat wait at the prime tower
+toolchanger/macros.cfg	https://github.com/viesturz/klipper-toolchanger	24c1444^	examples/tapchanger/macros.cfg	tapchanger-era example macros
+toolchanger/homing.cfg	https://github.com/viesturz/klipper-toolchanger	24c1444^	examples/tapchanger/homing.cfg	largely rewritten (tool-less homing, per-tool Z offset correction)
+toolchanger/tool_detection.cfg	https://github.com/Contomo/klipper-toolchanger-hard	eb11cda^	examples/z probe/per tool probe/tool_detection.cfg	hard stop on failed pickup; tool change counters
+toolchanger/dock_tuner.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	examples/dock location/fixed/dock_tuner.cfg	dock position tuner popup
+toolchanger/tdp_dock_autotune.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	examples/extras/tool_drop_detection/tdp_dock_autotune.cfg	staging move before autotune
+toolchanger/tool_drop_detection.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	examples/extras/tool_drop_detection/tool_drop_detection.cfg	accelerometer drop detection
+toolchanger/offsets_adjust_record.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	usermods/VIN-y/save_baby_steps/offsets_adjust_record.cfg	save baby steps per tool
+toolchanger/tc_shapers.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	examples/misc-macros/tc_shapers.cfg	per-tool input shapers (rewritten in the same style)
+toolchanger/heater_power_distributor.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	examples/extras/heater_power_distributor/heater_power_distributor.cfg	shared heater power budget
+toolchanger/tools_calibrate.cfg	https://github.com/Contomo/klipper-toolchanger-hard	fbcd211	examples/calibrate-offsets.cfg	offset calibration: QGL guard, KOMB brush, sanity check
+toolchanger/toolhead_0.cfg	https://github.com/MotorDynamicsLab/Nitehawk-36	feae221	Configs/nitehawk-36.cfg	Nitehawk-36 (USB) tool; pins from the LDO sample config
+toolchanger/toolhead_1.cfg	https://github.com/MotorDynamicsLab/Nitehawk-36	feae221	Configs/nitehawk-36.cfg	Nitehawk-36 (USB) tool
+toolchanger/toolhead_2.cfg	https://github.com/MotorDynamicsLab/Nitehawk-36	feae221	Configs/nitehawk-36.cfg	Nitehawk-36 (USB) tool
+toolchanger/toolhead_3.cfg	https://github.com/MotorDynamicsLab/Nitehawk-36	feae221	Configs/nitehawk-36.cfg	Nitehawk-36 (USB) tool
+heatsoak.cfg	https://github.com/TheJoe1990/Tuning-Instructions	main	Klipper Heatsoak/Heatsoak_Universal.cfg	our heatsoak template + Boss PRINTER_HEATSOAK_PARK tasks

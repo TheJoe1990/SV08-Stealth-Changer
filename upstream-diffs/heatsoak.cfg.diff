@@ -1,0 +1,1156 @@
+--- upstream/Klipper Heatsoak/Heatsoak_Universal.cfg @ main
++++ config/heatsoak.cfg
+@@ -2,39 +2,29 @@
+ #  UNIVERSAL HEATSOAK MACRO  —  Heatsoak_Universal.cfg
+ # =============================================================================
+ #
+-#  Drop this file into your Klipper config and [include] it.
+-#  Then:
+-#    1. Edit _HEATSOAK_CFG to match your printer
+-#    2. Implement PRINTER_HEATSOAK_PARK (or leave default: bed center)
+-#    3. Implement PRINT_START_BASE with your machine-specific pre-print sequence
+-#    4. Your machine's actual renamed pause/resume macro names (BASE_PAUSE vs
+-#       PAUSE_BASE, and BASE_RESUME vs RESUME_BASE, depending on how your
+-#       [gcode_macro PAUSE]/[gcode_macro RESUME] overrides set
+-#       `rename_existing`) are auto-detected at runtime by
+-#       _resolve_pause_macro()/_resolve_resume_macro() -- no manual
+-#       verification needed before deploying. If your [gcode_macro PAUSE]/
+-#       [gcode_macro RESUME] has no rename_existing configured, it hard-errors
+-#       with a clear message instead of failing silently (see CHANGELOG --
+-#       this used to require manual verification and a wrong guess once let
+-#       a real layer print under a "running" soak on the Voron 0,
+-#       2026-08-04/05; see MMU SUPPORT SECTION note at the bottom for the
+-#       full story).
+-#    5. If your printer has an MMU, see the MMU SUPPORT SECTION near the
+-#       bottom of this file -- otherwise delete that whole section.
+-#
+-#  SLICER START GCODE:
+-#    PRINT_START BED={bed_temperature} EXTRUDER={temperature}
+-#    Optional: CHAMBER={chamber_temp}
++#  DEPLOYED ON: Boss (SV08 toolchanger), 2026-09-14 -- template's generic entry point
++#  (originally PRINT_START) renamed to START_PRINT to match this printer's existing slicer
++#  profile. No START_PRINT_BASE/MMU
++#  sections here: PRINTER_HEATSOAK_PARK does Boss's rough-QGL + tool-offset-calibration pass
++#  (ported from the old HEATSOAK macro, TC_CALIBRATION_MODE gating untouched), and both
++#  post-soak/no-soak paths call straight into Boss's existing _START_PRINT (sovol-macros.cfg,
++#  unmodified except for an added toolchanger safety check at its top -- see that file).
++#  PAUSE/RESUME/CANCEL_PRINT all live in sovol-macros.cfg as single canonical macros -- see
++#  the comments on those sections for why (two same-named [gcode_macro] sections silently
++#  merge in Klipper instead of erroring; this bit RESUME for real before this deploy).
++#
++#  SLICER START GCODE: unchanged from before this deploy -- the Orca profile still calls
++#  START_PRINT with whatever BED_TEMP/EXTRUDER_TEMP/TOOL/TOOL_TEMP/T{n}_TEMP/CALIBRATE fields
++#  it already sends (see _START_PRINT's own header comment in sovol-macros.cfg for the full
++#  list) -- not independently re-verified against the live Orca profile itself here.
+ #
+ #  FEATURES
+ #  --------
+ #  * Soak time scales with print duration parsed from filename (1h30m etc.)
+ #    Falls back to soak_default_minutes if no time code found in filename.
+ #  * Countdown heartbeat doesn't start until the bed has actually reached
+-#    target temp -- not from the moment the soak begins -- via a non-blocking
+-#    poll, not M190 (see the 2026-08-31 and 2026-09-14 CHANGELOG entries).
+-#    Nozzle heat and PRINTER_HEATSOAK_PARK (your heatsoak-tasks hook) both run
+-#    in parallel with the bed instead of gating the countdown behind them too.
++#    target temp (and nozzle/park are done) -- not from the moment the soak
++#    begins. Reuses M190's own blocking wait rather than polling a threshold.
+ #  * Optional chamber sensor: waits for temp before countdown begins,
+ #    and/or skips soak if chamber is already close enough to target.
+ #    Chamber target comes from the CHAMBER= param passed by slicer.
+@@ -54,17 +44,9 @@
+ #    soak -- see the INIT branch below for why this matters.
+ #  * Stale heatsoak_active state from before a Klipper restart is
+ #    automatically cleared on startup.
+-#  * Any CANCEL_PRINT (Mainsail's button, a raw API call, the popup's own
+-#    Cancel) tears down an active soak cleanly, via a one-line
+-#    _HEATSOAK_CANCEL_TEARDOWN hookup in your own CANCEL_PRINT -- this file
+-#    never overrides your CANCEL_PRINT itself (see CHANGELOG 2026-10-02).
+-#  * A stale pause left over from before the print can't defeat the soak's
+-#    pause (CLEAR_PAUSE at print start), and if the pause ever fails to
+-#    stop the file anyway, a 1s-later guard cancels instead of printing.
+-#  * Resume during a soak (Mainsail/Fluidd/KlipperScreen/touchscreen) acts
+-#    as Skip instead of starting the print body under a still-running soak,
+-#    via a one-line _HEATSOAK_RESUME_CHECK hookup in your own RESUME (same
+-#    pattern as the cancel hookup; see CHANGELOG 2026-10-03).
++#  * An external CANCEL_PRINT (Mainsail's button, a raw API call -- anything
++#    other than this macro's own Cancel button) also tears down any active
++#    soak cleanly instead of leaving its timers running unaware.
+ #
+ # =============================================================================
+ #
+@@ -87,11 +69,11 @@
+ #       never saving state. Fixed: store the already-decoded named fields
+ #       (LAYER/FILAMENT/EXCLUDE/SURFACE/OAPA/DMGCC, or whatever your slicer
+ #       passes) instead of the raw string, and re-quote fresh at the
+-#       PRINT_START_BASE call site in resume_and_start().
++#       START_PRINT_BASE call site in resume_and_start().
+ #
+ #  2026-08-06 -- Standing requirement added: homing (Z at minimum), leveling/
+ #  QGL, and bed mesh must ALWAYS happen hot, after the soak -- see the
+-#  "Re-home, level, mesh" comment block in PRINT_START_BASE below for the
++#  "Re-home, level, mesh" comment block in START_PRINT_BASE below for the
+ #  full rationale and a concrete gotcha (a leveling module's "already
+ #  applied" flag silently skipping a hot re-level because a pre-soak homing
+ #  pass had already flipped it true) hit for real on the Rat (RatOS).
+@@ -202,65 +184,12 @@
+ #  exposed the first attempt's bug. The corrected poll-based version is
+ #  NOT yet print-tested on real hardware -- pushed to a `beta` branch on
+ #  GitHub, not main, pending real prints.
+-#
+-#  2026-09-14 (beta) -- Deployed on a real Klipper toolchanger (Sovol SV08,
+-#  6-toolhead design, 3 built) for the first time, which forced two real
+-#  engine changes that apply to every machine, not just toolchangers:
+-#
+-#  1. The HEATUP TICK BRANCH used to gate PRINTER_HEATSOAK_PARK behind BOTH
+-#     bed_ready AND nozzle_ready, checked sequentially (nozzle heat command
+-#     wasn't even issued until the bed finished -- a real, if minor, wasted
+-#     wait on every machine, not just this one). On the toolchanger, a
+-#     per-tool calibration macro placed in PRINTER_HEATSOAK_PARK made this
+-#     actively wrong: whichever of bed/calibration took longer became the
+-#     effective gate, and calibration was consistently the slower one in
+-#     practice, so the "run stuff in parallel with heat-up" intent of this
+-#     hook was defeated -- it was really running sequentially after,
+-#     disguised as parallel. Fixed by making bed the ONLY gate (nozzle now
+-#     heats in parallel in _HEATSOAK_PREP, unconditionally, and
+-#     PRINTER_HEATSOAK_PARK is responsible for its own heating needs if any
+-#     -- see the USER HOOK section's self-heating note). Soak time itself
+-#     (state.soak_total, renamed from soak_left since it's no longer a
+-#     decrementing counter -- see point 2) still only starts counting once
+-#     the bed is actually at temperature, unchanged in spirit from the
+-#     2026-08-27 standing requirement -- soaking is about holding the frame
+-#     hot AT temperature, not from when heat-up begins. What changed is that
+-#     PRINTER_HEATSOAK_PARK now runs in the same breath the countdown starts
+-#     rather than gating it, so its real duration is correctly absorbed
+-#     into the already-running deadline instead of stacking after it.
+-#
+-#  2. Hit a genuine Klipper macro-execution constraint while building #1:
+-#     verified against klippy/extras/gcode_macro.py's GetStatusWrapper that
+-#     an ENTIRE gcode_macro's Jinja template renders to one flat gcode
+-#     string before any of it executes for real, with printer.* status
+-#     cached per-render -- so a Jinja-level "how long did that take" check
+-#     placed right after a long macro call in the SAME template invocation
+-#     cannot see that call's real duration; it evaluates before the call
+-#     ever runs for real. This is why "resume immediately if
+-#     PRINTER_HEATSOAK_PARK alone ran past the deadline" is NOT checked
+-#     synchronously in the HEATUP TICK BRANCH -- that would be dead code.
+-#     Instead a short (1s) follow-up heartbeat is armed unconditionally
+-#     right after the hook returns; THAT separate, later call gets a fresh
+-#     printer-status read and correctly detects an already-passed deadline,
+-#     a few real seconds late but correct rather than synchronous but wrong.
+-#     Full technical writeup: reference_klipper_macro_jinja_render_timing in
+-#     the author's own memory system, not reproduced in full here.
+-#
+-#  Also fixed along the way: the ADJUST (+/- minute buttons) branch used to
+-#  unconditionally treat state.soak_left as an existing deadline-relative
+-#  counter -- clicking Adjust during the heating phase (before any deadline
+-#  exists yet) computed nonsense. Now branches on state.heating: adjusts
+-#  soak_total (the not-yet-started budget) while still heating, or the real
+-#  soak_deadline once counting down.
+-#
+-#  Verified via an offline Jinja render-based test harness (mocked printer
+-#  object, simulated multi-call tick sequences with controlled fake
+-#  timestamps) covering: normal case (hook finishes well before the
+-#  deadline), hook-runs-longer-than-the-whole-soak edge case (confirms the
+-#  next-tick resume works), and the ADJUST-during-heating fix -- not yet
+-#  print-tested against real per-tool calibration hardware timing, only
+-#  against the toolchanger's own deployed fork with the same test harness.
+-#
++# =============================================================================
++
++
++# =============================================================================
++#  CHANGELOG (hardening)
++# =============================================================================#
+ #  2026-10-02 -- Real failure on Printer Max (Neptune 4 Max): the soak's own
+ #  pause silently did nothing, so the print body ran underneath the popup
+ #  while the soak's timers dropped the nozzle to soak_nozzle_temp -- the
+@@ -298,27 +227,7 @@
+ #    4. Soak heartbeats now tear the soak down themselves if the print has
+ #       already ended (print_stats cancelled/error/complete), as a backstop
+ #       for any cancel path that skips the teardown.
+-#
+-#  2026-10-03 -- Resume during a soak = Skip. Before this, pressing Resume
+-#  (any UI, or a printer's touchscreen) while the soak was paused ran the
+-#  printer's normal RESUME: the file carried on into the print body on a
+-#  bed that wasn't soaked, with no post-soak re-home/mesh, while the soak's
+-#  own timers kept counting down in the background. Now:
+-#    1. _HEATSOAK_RESUME_CHECK, called first thing in your own RESUME (one
+-#       line, like the cancel hookup -- this file still never defines RESUME
+-#       itself, because Klipper would MERGE it over yours, see 2026-10-02).
+-#       During an active soak it schedules a Skip and then stops the rest of
+-#       your RESUME by raising an error (the only way a called macro can
+-#       stop its caller in Klipper). You see one red "Resume pressed during
+-#       the soak" line, then the normal Skip runs: popup closes, soak
+-#       resumes the print properly through PRINT_START_BASE. No-op when no
+-#       soak is active, so normal pause/resume is untouched.
+-#    2. The startup self-check now also errors if no RESUME hookup is found.
+-#       Accepted spots: your [gcode_macro RESUME] gcode, mainsail/fluidd
+-#       client.cfg's _CLIENT_VARIABLE variable_user_resume_macro, or Happy
+-#       Hare's _MMU_CLIENT_VARS variable_user_resume_extension.
+-# =============================================================================
+-
++# =============================================================================
+ 
+ # =============================================================================
+ #  PRINTER CONFIGURATION  --  edit everything in this section
+@@ -365,17 +274,20 @@
+ # -- Nozzle temperature during soak ------------------------------------------
+ # Low enough to avoid ooze, high enough for a probe that needs some heat.
+ # Set to 0 to leave nozzle cold during soak.
+-variable_soak_nozzle_temp: 150.0
++# Boss-specific: matches TC_SERVICE_TOOL.probe_temp (sovol-macros.cfg) -- the service
++# tool's safe probing/QGL/calibration temp, same value the old HEATSOAK macro used.
++variable_soak_nozzle_temp: 125.0
+ 
+ # -- Fans during soak ---------------------------------------------------------
+ # The part cooling fan ([fan] type) does NOT support SET_FAN_SPEED and must be
+ # controlled separately via M106/M107.
+ # Speed 0.0-1.0. Set to 0.0 to leave the part fan off during soak.
+-variable_soak_part_fan_speed: 0.0
++# Boss-specific: 1.0 matches the old HEATSOAK macro's M106 S255 (blow hot air during soak).
++variable_soak_part_fan_speed: 1.0
+ 
+ # [fan_generic] fans only -- use SET_FAN_SPEED. Fan names must match exactly as
+ # defined in printer.cfg. Speed is 0.0-1.0. All listed fans are zeroed when
+-# soak ends -- PRINT_START_BASE takes over fan control for the print.
++# soak ends -- START_PRINT_BASE takes over fan control for the print.
+ # Set to [] to leave all generic fans untouched during soak.
+ # On enclosed printers, running circulation fans during soak helps distribute
+ # heat evenly through the chamber and speeds up thermal stabilisation.
+@@ -404,74 +316,84 @@
+ 
+ 
+ # =============================================================================
+-#  USER HOOK: PRINTER_HEATSOAK_PARK  --  MACROS TO RUN DURING THE HEATSOAK
+-# =============================================================================
+-#  This is where you put ANY task you want to happen during the soak window --
+-#  called exactly once, right when the bed reaches target temp (see the HEATUP
+-#  TICK BRANCH in PRINT_START), at the same moment the soak countdown itself
+-#  starts. It does NOT gate or delay the countdown -- the deadline is already
+-#  set before this runs, so whatever this macro takes to execute is simply
+-#  absorbed into however much of the soak window is left, not stacked after
+-#  it. If this macro alone takes longer than the whole configured soak
+-#  duration, the print resumes the moment it finishes (see PRINT_START's
+-#  IS_TICK branch) -- no extra wait tacked on either way.
+-#
+-#  Nozzle temp during the soak is already handled separately by _HEATSOAK_PREP
+-#  (a plain M104 to _HEATSOAK_CFG.soak_nozzle_temp, fired non-blocking
+-#  alongside the bed at soak start) -- you do NOT need to heat/wait for the
+-#  nozzle here for that baseline behavior. Only add your own M104/M109 (or
+-#  SET_HEATER_TEMPERATURE/TEMPERATURE_WAIT) below if a specific task needs a
+-#  DIFFERENT temp than the soak standby, or needs to guarantee it's actually
+-#  reached before proceeding -- write it to manage its own heating/waiting
+-#  internally rather than relying on this hook having already gated on a
+-#  particular temp, since it doesn't (a real toolchanger's tool-offset
+-#  calibration macro on this pattern turned out to already need this --
+-#  CALIBRATE_TOOL_OFFSETS and KOMB both handle their own M104/M109 or
+-#  SET_HEATER_TEMPERATURE/TEMPERATURE_WAIT internally for exactly this
+-#  reason). This also means the popup cannot visibly update WHILE this macro
+-#  is running (Klipper only runs one gcode script at a time -- see the HEATUP
+-#  TICK BRANCH's own comment in PRINT_START for the full mechanism) -- it'll
+-#  hold whatever it last showed, then correct itself a moment after this
+-#  macro returns.
+-#
+-#  DEFAULT (most machines): just park at bed center, nothing else -- this is
+-#  what "the soak" means with no extra tasks: sit still and let the bed/frame
+-#  come up to temperature.
+-#
+-#  OTHER EXAMPLES (uncomment / adapt as needed for your machine):
+-#    * Run circulation fans harder during the soak than _HEATSOAK_CFG.soak_fans
+-#      already sets, or run a fan ONLY once parked (e.g. to avoid blowing on
+-#      the bed while it's still climbing to temp):
+-#        SET_FAN_SPEED FAN=nevermore SPEED=1.0
+-#    * Toolchanger/MMU: preheat and calibrate every tool that'll be used this
+-#      print instead of just the active one -- each tool-select macro should
+-#      manage its own heating internally, matching the KOMB/CALIBRATE_TOOL_
+-#      OFFSETS pattern described above, rather than assuming a shared preheat
+-#      already happened:
+-#        {% for t in [0, 1, 2] %}
+-#            SELECT_TOOL T={t}
+-#            YOUR_TOOL_CALIBRATION_MACRO
+-#        {% endfor %}
+-#    * Bed mesh prep that's safe to do cold/warm (not the final hot mesh --
+-#      that still belongs in PRINT_START_BASE after the soak, per the
+-#      standing "re-home/level/mesh must happen hot, after the soak"
+-#      requirement elsewhere in this file):
+-#        QUAD_GANTRY_LEVEL   ; a rough pre-soak level, refined again hot later
+-#    * Anything genuinely one-time and slow that doesn't need bed heat at all
+-#      (a nozzle-clean routine, a filament-runout sensor self-test, etc.) --
+-#      this hook is a generic "run stuff during the dead time" slot, not
+-#      specific to any one use case.
++#  USER HOOK: PRINTER_HEATSOAK_PARK
++#  Move toolhead to soak position after homing.
++#  Default: bed center at park_z. Override to customize.
+ # =============================================================================
+ 
+ [gcode_macro PRINTER_HEATSOAK_PARK]
+-description: Tasks to run during the heatsoak (default: just park). Override to add more -- see the block comment above for real examples and the self-heating caveat.
++description: "Park the toolhead for heatsoak. Boss-specific: also does the rough QGL +\
++    tool-offset calibration (or brush-only) pass here, ported from the old HEATSOAK macro's\
++    steps 3-6 -- this runs once, right as heating finishes and before the visible countdown\
++    starts ticking (soak_left isn't decremented until after this returns), same timing the old\
++    HEATSOAK macro used. TC_CALIBRATION_MODE gating is untouched, per explicit confirmation\
++    this is intentional -- do not flip its default."
+ gcode:
+     {% set cfg = printer["gcode_macro _HEATSOAK_CFG"] %}
+-
+-    # ---- CUSTOMISE FROM HERE: add your own tasks above this park move ----
+-
+-    # ---- END CUSTOMISE ----
+-
++    {% set st  = printer["gcode_macro START_PRINT"] %}
++    {% set svc = printer["gcode_macro TC_SERVICE_TOOL"] %}
++    {% set svc_tool = svc.service_tool|int %}
++
++    # This is the FIRST thing that touches the toolchanger during a soak (it runs
++    # before _START_PRINT, which is where the 2026-09-14 INITIALIZE_TOOLCHANGER fix
++    # was placed) -- so SELECT_TOOL below can still hit "toolchanger status is
++    # uninitialized" on its own, e.g. after a print that faulted mid-toolchange
++    # (confirmed 2026-09-15: an "Extrude below minimum temp" fault auto-exited the
++    # previous SD print and left toolchanger status uninitialized; the next print's
++    # heatsoak crashed here before ever reaching _START_PRINT's init call). Same
++    # idempotent init/verify pair used there and in RESUME, called first here too.
++    INITIALIZE_TOOLCHANGER
++    VERIFY_TOOL_DETECTED
++
++    # Force baseline physical service tool onto the gantry before QGL/calibration.
++    SELECT_TOOL T={svc_tool}
++
++    # Rough QGL with the service tool -- same as old HEATSOAK step 3.
++    M117 Initial QGL (rough)...
++    QUAD_GANTRY_LEVEL
++
++    # Tool offset calibration (or brush-only), gated by TC_CALIBRATION_MODE -- unchanged
++    # from the old HEATSOAK macro. Runs here so it's still part of the heatsoak session
++    # (before the countdown proper), not moved out to post-soak print-start.
++    {% set do_cal = st.state.get("calibrate", 1)|int %}
++    {% set cal_enabled = 1 %}
++    {% if "gcode_macro TC_CALIBRATION_MODE" in printer %}
++        {% set cal_enabled = printer["gcode_macro TC_CALIBRATION_MODE"].enabled|int %}
++    {% endif %}
++
++    {% if do_cal and cal_enabled %}
++        M117 Calibrating tool offsets...
++        # 2026-10-03: calibrate only the tools THIS print uses. The slicer passes Tn_TEMP
++        # only for used tools (plus TOOL= the first tool), all captured in the soak state
++        # before this runs. (_START_PRINT.tools_used_during_print can't be used here: it
++        # is only set later, so at this point it still holds the PREVIOUS print's tools.)
++        # 2026-10-04: map slicer numbers -> physical tools (Mainsail SET_TOOL_MAPPING lives
++        # in each T<n> macro's `tool` variable) so the tools that will really print get
++        # calibrated, not the slicer-numbered ones.
++        {% set t0 = st.state.get("tool", 0)|int %}
++        {% set ns_cal = namespace(tools=[printer["gcode_macro T" ~ t0].tool|int if ("gcode_macro T" ~ t0) in printer else t0]) %}
++        {% for n in range(6) %}
++            {% set p = printer["gcode_macro T" ~ n].tool|int if ("gcode_macro T" ~ n) in printer else n %}
++            {% if st.state.get("t%d_temp" % n, 0)|int > 0 and p not in ns_cal.tools %}
++                {% set ns_cal.tools = ns_cal.tools + [p] %}
++            {% endif %}
++        {% endfor %}
++        CALIBRATE_TOOL_OFFSETS CAL_TEMP={cfg.soak_nozzle_temp|int} TOOLS={ns_cal.tools|join(",")}
++    {% else %}
++        {% if do_cal and not cal_enabled %}
++            { action_respond_info("HEATSOAK: calibration disabled via TC_CALIBRATION_MODE; brushing service tool only") }
++        {% else %}
++            { action_respond_info("HEATSOAK: calibration skipped (CALIBRATE=" ~ do_cal ~ "); brushing service tool only") }
++        {% endif %}
++
++        M117 Brushing service tool T{svc_tool}...
++        SELECT_TOOL T={svc_tool}
++        CALIBRATE_MOVE_OVER_PROBE
++        KOMB
++        M104 T{svc_tool} S{cfg.soak_nozzle_temp|int}
++    {% endif %}
++
++    # Default center park at soak height -- unchanged from the template.
+     {% if printer.toolhead.homed_axes|lower == "xyz" %}
+         {% set cx = (printer.toolhead.axis_maximum.x|float) / 2.0 %}
+         {% set cy = (printer.toolhead.axis_maximum.y|float) / 2.0 %}
+@@ -494,11 +416,18 @@
+ [delayed_gcode _HEATSOAK_STARTUP_CLEAR]
+ initial_duration: 2
+ gcode:
+-    {% set st = printer["gcode_macro PRINT_START"] %}
++    {% set st = printer["gcode_macro START_PRINT"] %}
++    # Unconditional, every restart: clearing heatsoak_active/state below only fixes
++    # the backend logic -- it never told Mainsail/Fluidd to close whatever popup was
++    # last on screen (found 2026-09-15: a fault-exited print or any restart mid-soak
++    # left the countdown/heatsoak dialog stuck open indefinitely, with the printer
++    # otherwise fully idle underneath it). action:prompt_end is a no-op if nothing is
++    # actually open, so it's safe to send every time regardless of the state below.
++    RESPOND TYPE=command MSG="action:prompt_end"
+     {% if st.heatsoak_active or (st.state and (st.state|string) != "{}") %}
+         RESPOND TYPE=echo MSG="Heatsoak: clearing stale active state left over from before this restart"
+-        SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=heatsoak_active VALUE=0
+-        SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=state VALUE="{{}}"
++        SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=heatsoak_active VALUE=0
++        SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=state VALUE="{{}}"
+     {% endif %}
+     # Self-check: is _HEATSOAK_CANCEL_TEARDOWN hooked into the live
+     # CANCEL_PRINT, and is no old copy of this file's former CANCEL_PRINT
+@@ -537,17 +466,16 @@
+ 
+ [delayed_gcode _HEATSOAK_PREP]
+ gcode:
+-    {% set st  = printer["gcode_macro PRINT_START"] %}
++    {% set st  = printer["gcode_macro START_PRINT"] %}
+     {% set cfg = printer["gcode_macro _HEATSOAK_CFG"] %}
+ 
+     {% if st.state and (st.state|string) != "{}" and st.heatsoak_active %}
+         {% set bed = st.state.get("bed", 60)|float %}
+ 
+-        # Start bed AND nozzle heating together, both non-blocking. These used to
+-        # be sequenced (nozzle heat only started once bed_ready) -- see the
+-        # 2026-09-14 CHANGELOG entry for why that was wrong even for machines
+-        # with no extra PRINTER_HEATSOAK_PARK tasks: it just added a needless
+-        # wait for no reason, since neither heater depends on the other.
++        # Start bed AND nozzle heating together, both non-blocking -- calibration only
++        # needs the nozzle, not the bed, so these must not be sequenced (see
++        # PRINTER_HEATSOAK_PARK / the HEATUP TICK BRANCH below for why bed and
++        # nozzle-readiness are now checked independently instead of bed-then-nozzle).
+         M140 S{bed}
+         {% if cfg.soak_nozzle_temp|float > 0 %}
+             M104 S{cfg.soak_nozzle_temp|int}
+@@ -600,7 +528,7 @@
+ #  is still reading the file, the pause did NOT take (stale pause flag, wrong
+ #  macro name, anything) and the real print body is running underneath the
+ #  popup on unready heaters. Abort loudly rather than let that continue.
+-#  A file-reading pause stops virtual_sdcard right after PRINT_START returns,
++#  A file-reading pause stops virtual_sdcard right after START_PRINT returns,
+ #  so by the time this fires a working pause always reads is_active = False.
+ #  If a blocking command in the file (M190/M109) holds the gcode mutex, this
+ #  runs as soon as that finishes -- later, but before the print gets far.
+@@ -608,7 +536,7 @@
+ 
+ [delayed_gcode _HEATSOAK_PAUSE_GUARD]
+ gcode:
+-    {% set st = printer["gcode_macro PRINT_START"] %}
++    {% set st = printer["gcode_macro START_PRINT"] %}
+     {% if st.heatsoak_active and printer.virtual_sdcard is defined and printer.virtual_sdcard.is_active %}
+         RESPOND TYPE=error MSG="Heatsoak: the soak's PAUSE did not stop the print (file still running) -- cancelling to protect the print. Check the console for 'Print already paused'."
+         CANCEL_PRINT
+@@ -622,7 +550,7 @@
+ [delayed_gcode _HEATSOAK_UPDATE]
+ gcode:
+     UPDATE_DELAYED_GCODE ID=_HEATSOAK_UPDATE DURATION=0
+-    {% set st = printer["gcode_macro PRINT_START"] %}
++    {% set st = printer["gcode_macro START_PRINT"] %}
+     {% if st.state and (st.state|string) != "{}" and st.heatsoak_active %}
+         {% if printer.print_stats.state in ["cancelled", "error", "complete"] %}
+             # Print already ended without the soak being torn down (some
+@@ -630,7 +558,7 @@
+             # instead of ticking on forever. See CHANGELOG 2026-10-02.
+             _HEATSOAK_CANCEL_TEARDOWN
+         {% else %}
+-            PRINT_START TICK=1
++            START_PRINT TICK=1
+         {% endif %}
+     {% endif %}
+ 
+@@ -646,7 +574,7 @@
+ [delayed_gcode _HEATSOAK_HEATUP_TICK]
+ gcode:
+     UPDATE_DELAYED_GCODE ID=_HEATSOAK_HEATUP_TICK DURATION=0
+-    {% set st = printer["gcode_macro PRINT_START"] %}
++    {% set st = printer["gcode_macro START_PRINT"] %}
+     {% if st.state and (st.state|string) != "{}" and st.heatsoak_active %}
+         {% if printer.print_stats.state in ["cancelled", "error", "complete"] %}
+             # Print already ended without the soak being torn down (some
+@@ -654,34 +582,34 @@
+             # instead of ticking on forever. See CHANGELOG 2026-10-02.
+             _HEATSOAK_CANCEL_TEARDOWN
+         {% else %}
+-            PRINT_START HEATUP_TICK=1
++            START_PRINT HEATUP_TICK=1
+         {% endif %}
+     {% endif %}
+ 
+ 
+ # =============================================================================
+-#  PRINT_START  --  main entry point called by slicer
++#  START_PRINT  --  main entry point called by slicer
+ #  (rename this + all internal self-references to match your slicer profile
+ #  if it calls something else, e.g. HEATSOAK -- see the Voron 0 deployment
+ #  for an example of a pure rename with no logic changes)
+ #
+ #  Slicer call:
+-#    PRINT_START BED={bed_temperature} EXTRUDER={temperature}
++#    START_PRINT BED={bed_temperature} EXTRUDER={temperature}
+ #
+ #  Internal calls (do not use manually):
+-#    PRINT_START TICK=1        -- heartbeat tick
+-#    PRINT_START SKIP=1        -- user pressed Skip
+-#    PRINT_START CANCEL=1      -- user pressed Cancel
+-#    PRINT_START ADJUST=<+/->  -- user adjusted time (minutes)
+-#
+-# =============================================================================
+-
+-[gcode_macro PRINT_START]
++#    START_PRINT TICK=1        -- heartbeat tick
++#    START_PRINT SKIP=1        -- user pressed Skip
++#    START_PRINT CANCEL=1      -- user pressed Cancel
++#    START_PRINT ADJUST=<+/->  -- user adjusted time (minutes)
++#
++# =============================================================================
++
++[gcode_macro START_PRINT]
+ variable_state: {}
+ variable_heatsoak_active: 0
+ 
+ gcode:
+-    {% set SELF      = "PRINT_START" %}
++    {% set SELF      = "START_PRINT" %}
+     {% set IS_TICK   = params.TICK|default(0)|int %}
+     {% set IS_SKIP   = params.SKIP|default(0)|int %}
+     {% set IS_CANCEL = params.CANCEL|default(0)|int %}
+@@ -690,8 +618,8 @@
+     {% set IS_INIT   = not IS_TICK and not IS_SKIP and not IS_CANCEL and not IS_ADJUST and not IS_HEATUP_TICK %}
+ 
+     {% set cfg    = printer["gcode_macro _HEATSOAK_CFG"] %}
+-    {% set state  = printer["gcode_macro PRINT_START"].state %}
+-    {% set active = printer["gcode_macro PRINT_START"].heatsoak_active %}
++    {% set state  = printer["gcode_macro START_PRINT"].state %}
++    {% set active = printer["gcode_macro START_PRINT"].heatsoak_active %}
+ 
+     # ── Shared Jinja helpers ──────────────────────────────────────────────────
+ 
+@@ -863,26 +791,23 @@
+         M107
+     {%- endmacro -%}
+ 
+-    # Soak time is tracked as an ABSOLUTE deadline (state.soak_deadline, in
+-    # toolhead.estimated_print_time seconds -- a real wall-clock-derived reading that
+-    # keeps advancing through PAUSE/heating/PRINTER_HEATSOAK_PARK, unlike
+-    # print_stats.total_duration which freezes while paused) rather than a
+-    # decrementing counter -- set once the bed reaches target temp (see the HEATUP
+-    # TICK BRANCH below), not at INIT. Soaking is specifically about holding the
+-    # frame/gantry hot once the bed is at temperature, so the soak duration itself
+-    # (state.soak_total, the raw seconds decided at INIT) always runs in full
+-    # starting from that moment -- bed heat-up time is never subtracted from it.
+-    # PRINTER_HEATSOAK_PARK (your "tasks during the heatsoak" hook) runs immediately
+-    # AFTER the deadline is set, in the same tick, rather than gating the countdown
+-    # behind it -- so however long it takes IS counted against the already-running
+-    # deadline. If it alone runs past the deadline, remaining() reads 0 the moment
+-    # a fresh tick checks it (see the HEATUP TICK BRANCH's own comment for exactly
+-    # why this can't be checked synchronously within the same call as the hook
+-    # itself -- a real Klipper macro-execution constraint, not a design choice) and
+-    # the branch resumes right there, no separate countdown wait tacked on
+-    # afterward. remaining() is only meaningful once soak_deadline exists (i.e.
+-    # once the bed is ready); before that, callers show state.soak_total directly
+-    # (a fixed value, not counting down).
++    # Soak time itself is tracked as an ABSOLUTE deadline (state.soak_deadline, in
++    # toolhead.estimated_print_time seconds -- a real wall-clock-derived reading that keeps
++    # advancing through PAUSE/heating/calibration, unlike print_stats.total_duration which
++    # freezes while paused) rather than a decrementing counter -- but the deadline is only SET
++    # once the bed actually reaches target temp (see the HEATUP TICK BRANCH below), not at
++    # INIT. Soaking is specifically about holding the frame/gantry hot once the bed is at
++    # temperature, so the soak duration itself (state.soak_total, the raw seconds decided at
++    # INIT) always runs in full starting from that moment -- bed heat-up time is never
++    # subtracted from it. Tool calibration (PRINTER_HEATSOAK_PARK) runs immediately AFTER the
++    # deadline is set, in the same tick, rather than gating the countdown behind it -- so
++    # however long calibration takes IS counted against the already-running deadline (a real
++    # timestamp, unaffected by whether the popup could redraw during that blocking call --
++    # see the HEATUP TICK BRANCH's own comment for why it can't). If calibration alone runs
++    # past the deadline, remaining() reads 0 immediately once it returns and the branch
++    # resumes right there, no separate countdown wait tacked on afterward. remaining() is
++    # only meaningful once soak_deadline exists (i.e. once the bed is ready); before that,
++    # callers show state.soak_total directly (a fixed value, not counting down).
+     {%- macro remaining() -%}
+         { [state.get("soak_deadline", 0)|float - printer.toolhead.estimated_print_time|float, 0.0]|max }
+     {%- endmacro -%}
+@@ -923,23 +848,25 @@
+         UPDATE_DELAYED_GCODE ID=_HEATSOAK_UPDATE DURATION=0
+         UPDATE_DELAYED_GCODE ID=_HEATSOAK_PAUSE_GUARD DURATION=0
+         { ui("end") }
+-        SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=heatsoak_active VALUE=0
++        SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=heatsoak_active VALUE=0
+         { zero_soak_fans() }
+         {% if printer.pause_resume.is_paused %}
+             RESTORE_GCODE_STATE NAME=HEATSOAK_STATE MOVE=0
+             SAVE_GCODE_STATE NAME=PAUSE_STATE
+             { _resolve_resume_macro() }
+         {% endif %}
+-        {action_respond_info("Heatsoak complete -- calling PRINT_START_BASE")}
++        {action_respond_info("Heatsoak complete -- calling _START_PRINT")}
+         # EXTRUSION_MODE_RESET (2026-10-05): start the printer's own sequence in
+         # relative extrusion with E zeroed, whatever ran before (a filament load
+         # can leave M82). The slicer's own M83 only comes after this.
+         M83
+         G92 E0
+         # Decoded named fields, NOT the raw rawparams string -- see
+-        # CHANGELOG at the top of this file. Add/remove named params here to
+-        # match whatever your slicer profile actually passes.
+-        PRINT_START_BASE BED={state.get("bed", 60)|int} EXTRUDER={state.get("noz", 200)|int} LAYER={state.get("layer", "")} FILAMENT={state.get("filament", "")} EXCLUDE={state.get("exclude", "")} SURFACE="{state.get('surface', '')}" OAPA={state.get("oapa", "")} DMGCC="{state.get('dmgcc', '')}"
++        # CHANGELOG at the top of this file. Boss-specific: forwards TOOL/TOOL_TEMP/T{n}_TEMP
++        # too, on top of the generic fields, since Boss's own _START_PRINT (sovol-macros.cfg)
++        # needs them for multi-tool setup -- see the state.update() block in the INIT branch
++        # above for where these are captured.
++        _START_PRINT BED_TEMP={state.get("bed", 60)|int} EXTRUDER_TEMP={state.get("noz", 200)|int} TOOL={state.get("tool", 0)|int} TOOL_TEMP={state.get("tool_temp", 200)|int} T0_TEMP={state.get("t0_temp", 0)|int} T1_TEMP={state.get("t1_temp", 0)|int} T2_TEMP={state.get("t2_temp", 0)|int} T3_TEMP={state.get("t3_temp", 0)|int} T4_TEMP={state.get("t4_temp", 0)|int} T5_TEMP={state.get("t5_temp", 0)|int} LAYER={state.get("layer", "")} FILAMENT={state.get("filament", "")} EXCLUDE={state.get("exclude", "")} SURFACE="{state.get('surface', '')}" OAPA={state.get("oapa", "")} DMGCC="{state.get('dmgcc', '')}"
+         {% set _ = state.clear() %}
+     {%- endmacro -%}
+ 
+@@ -962,7 +889,7 @@
+                                    cfg.soak_max_seconds|float]|min %}
+                 {% set _ = state.update({"soak_deadline": now + newleft}) %}
+             {% endif %}
+-            SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=state VALUE="{state}"
++            SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=state VALUE="{state}"
+             { show_ui(newleft|int) }
+             {% if not state.get("heating", false) %}
+                 UPDATE_DELAYED_GCODE ID=_HEATSOAK_UPDATE DURATION=0.2
+@@ -993,45 +920,35 @@
+             UPDATE_DELAYED_GCODE ID=_HEATSOAK_HEATUP_TICK DURATION=0
+             UPDATE_DELAYED_GCODE ID=_HEATSOAK_PAUSE_GUARD DURATION=0
+             { ui("end") }
+-            SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=heatsoak_active VALUE=0
++            SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=heatsoak_active VALUE=0
+             { zero_soak_fans() }
+             RESTORE_GCODE_STATE NAME=HEATSOAK_STATE MOVE=0
+-            SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=state VALUE="{{}}"
++            SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=state VALUE="{{}}"
+             CANCEL_PRINT
+         {% else %}
+             {action_respond_info("Heatsoak CANCEL ignored: no active soak")}
+         {% endif %}
+ 
+     # =========================================================================
+-    #  HEATUP TICK BRANCH  --  non-blocking bed heat-wait poll, with live popup
+-    #  updates. Replaces M190 (see 2026-08-31 CHANGELOG and the comment in
+-    #  _HEATSOAK_PREP) -- each tick independently checks bed temp against
+-    #  target and either re-arms itself (still heating) or, once ready, starts
+-    #  the soak deadline and hands off to PRINTER_HEATSOAK_PARK. Tolerance is
+-    #  intentionally looser than Klipper's own PID-settle wait (which also
+-    #  checks the temperature's rate of change, not just its value) -- close
+-    #  enough for a pre-print soak target, not worth replicating exactly here.
+-    #  Tick interval is cfg.heatup_tick_interval (default 30s), not something
+-    #  shorter -- each show_ui() call resends a full
++    #  HEATUP TICK BRANCH  --  non-blocking bed/nozzle heat-wait poll, with
++    #  live popup updates. Replaces M190/M109 (see 2026-08-31 CHANGELOG and
++    #  the comment in _HEATSOAK_PREP) -- each tick independently checks the
++    #  current temp against target and either re-arms itself (still
++    #  heating) or, once both are reached, parks and hands off to the real
++    #  countdown heartbeat -- exactly what _HEATSOAK_PREP used to do inline
++    #  via M190/M109/PRINTER_HEATSOAK_PARK. Tolerance is intentionally
++    #  looser than Klipper's own PID-settle wait (which also checks the
++    #  temperature's rate of change, not just its value) -- close enough
++    #  for a pre-print soak target, not worth replicating exactly here.
++    #  Tick interval is cfg.heatup_tick_interval (default 30s), not
++    #  something shorter -- each show_ui() call resends a full
+     #  action:prompt_begin/text/show sequence (Mainsail's popup protocol has
+-    #  no partial-update command), which rebuilds the whole dialog every time.
+-    #  At 2s that rebuild was fast enough to make the popup visibly
+-    #  flash/disappear before you could read the new number; 4s was still too
+-    #  fast to read comfortably (both found live 2026-08-31) -- 30s gives
+-    #  plenty of time to actually read it. Edit _HEATSOAK_CFG.
+-    #  heatup_tick_interval, not this branch, to change it.
+-    #
+-    #  2026-09-14 -- this branch used to also gate on the nozzle reaching
+-    #  cfg.soak_nozzle_temp before running PRINTER_HEATSOAK_PARK, checked
+-    #  bed-then-nozzle sequentially (nozzle heat command wasn't even issued
+-    #  until the bed finished). Both were wrong on a real toolchanger: nozzle
+-    #  heat now fires in parallel with the bed back in _HEATSOAK_PREP, and
+-    #  PRINTER_HEATSOAK_PARK doesn't need to wait on ANY heater here at all --
+-    #  a real per-tool calibration macro on this pattern needed its own
+-    #  M104/M109 regardless (see the USER HOOK section above), so gating on a
+-    #  generic nozzle-ready check just added a redundant wait for no benefit.
+-    #  Bed is now the ONLY gate -- soaking is specifically about holding the
+-    #  frame/gantry hot once the bed is at temperature.
++    #  no partial-update command), which rebuilds the whole dialog every
++    #  time. At 2s that rebuild was fast enough to make the popup visibly
++    #  flash/disappear before you could read the new number; 4s was still
++    #  too fast to read comfortably (both found live 2026-08-31) -- 30s
++    #  gives plenty of time to actually read it. Edit
++    #  _HEATSOAK_CFG.heatup_tick_interval, not this branch, to change it.
+     # =========================================================================
+     {% elif IS_HEATUP_TICK %}
+         {% if state and (state|string) != "{}" and active and state.get("heating", false) %}
+@@ -1042,57 +959,57 @@
+                 { show_ui(state.get("soak_total", 0)|float|int) }
+                 UPDATE_DELAYED_GCODE ID=_HEATSOAK_HEATUP_TICK DURATION={cfg.heatup_tick_interval}
+             {% else %}
+-                # Start the soak clock right now, for the FULL configured duration --
+-                # fixed, independent of whatever PRINTER_HEATSOAK_PARK below takes --
+-                # and only then run it, in the same breath, instead of gating the
++                # Bed is at temp: start the soak clock right now, for the FULL configured
++                # duration -- fixed, independent of whatever calibration below takes -- and
++                # only then run calibration, in the same breath, instead of gating the
+                 # countdown behind it.
+                 #
+-                # IMPORTANT Klipper constraint (verified against
+-                # klippy/extras/gcode_macro.py's GetStatusWrapper): a gcode_macro's
+-                # ENTIRE Jinja template renders into one flat gcode string up front --
+-                # printer.toolhead.estimated_print_time is read once and CACHED for
+-                # every reference within that one render -- and only after the whole
+-                # string is produced does Klipper dispatch it for real, line by line,
+-                # which is when real time actually elapses. That means a Jinja-level
+-                # "how much time did that take" check placed after PRINTER_HEATSOAK_
+-                # PARK in THIS SAME template call cannot see its real duration -- it
+-                # evaluates before that macro ever runs for real, not after. So there
+-                # is no same-call "resume instantly the moment it finishes" branch
+-                # here; that would be dead code that always reads a noticeably
+-                # positive remaining time regardless of how long the hook actually
+-                # took. It's also why the popup can't redraw live while
+-                # PRINTER_HEATSOAK_PARK is running -- it's committed to the string
+-                # before that macro's gcode even starts executing.
++                # IMPORTANT Klipper constraint (verified against klippy/extras/gcode_macro.py
++                # GetStatusWrapper): a gcode_macro's ENTIRE Jinja template is rendered into one
++                # flat gcode string up front -- printer.toolhead.estimated_print_time is read
++                # once and CACHED for every reference within that one render -- and only after
++                # the whole string is produced does Klipper dispatch it for real, line by line,
++                # which is when real time actually elapses. That means a Jinja-level "how much
++                # time did that take" check placed after PRINTER_HEATSOAK_PARK in THIS SAME
++                # template call cannot see calibration's real duration -- it evaluates before
++                # calibration ever runs for real, not after. So there is no same-call "resume
++                # instantly the moment calibration finishes" branch here; that would be dead
++                # code that always reads noticeably positive minutes remaining regardless of
++                # calibration's real length. Also why the popup can't redraw live during
++                # PRINTER_HEATSOAK_PARK -- it's committed to the string before calibration's
++                # gcode even starts executing.
+                 #
+-                # What DOES work: the deadline itself is a real timestamp, set below
+-                # BEFORE the hook runs. Once it actually finishes and this call's
+-                # remaining lines execute for real, the short heartbeat armed just
+-                # below fires moments later as a genuinely SEPARATE macro call/render
+-                # -- which reads a fresh, current estimated_print_time and correctly
+-                # sees however long the hook actually took. That's where "resume
+-                # immediately if it alone ran past the deadline" actually happens --
+-                # a few real seconds after it returns, not synchronously with it.
+-                # Kept short (1s, not the usual 30s heatup_tick_interval)
+-                # specifically to make that gap negligible.
++                # What DOES work: the deadline itself is a real timestamp, correctly set below
++                # BEFORE calibration's gcode runs. Once calibration actually finishes and this
++                # call's remaining lines execute for real, the short heartbeat armed just below
++                # fires moments later as a genuinely SEPARATE macro call/render -- which reads a
++                # fresh, current estimated_print_time and correctly sees however long
++                # calibration actually took. That's where "resume immediately if calibration
++                # alone ran past the deadline" actually happens -- a few real seconds after
++                # calibration returns, not synchronously with it. Kept short (1s, not the usual
++                # 30s heatup_tick_interval) specifically to make that gap negligible.
+                 {% set _ = state.update({
+                     "heating":       false,
+                     "soak_deadline": printer.toolhead.estimated_print_time|float + state.get("soak_total", 0)|float,
+                 }) %}
+-                SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=state VALUE="{state}"
+-                RESPOND TYPE=echo MSG="Heatsoak: bed at {bed_target}C. Countdown started, running heatsoak tasks now."
+-
+-                # Regenerate the popup right here, at the actual moment the countdown
+-                # starts -- otherwise it keeps showing the old "once bed is heated"
+-                # heating-phase text for however long PRINTER_HEATSOAK_PARK takes,
+-                # which reads as stuck/stale. This is the freshest correct value
+-                # obtainable at this point (full soak_total, since the hook hasn't
+-                # run yet) -- see the comment above for why a MORE current value
+-                # can't be computed here, and why the 1s follow-up below is what
+-                # actually corrects it again once the hook's real duration is known.
++                SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=state VALUE="{state}"
++                RESPOND TYPE=echo MSG="Heatsoak: bed at {bed_target}C. Countdown started, calibrating tools now."
++
++                # Regenerate the popup right here, at the actual moment the countdown starts --
++                # otherwise it keeps showing the old "once bed is heated" heating-phase text for
++                # however long calibration takes, which is confusing (looks stuck/stale). This is
++                # the freshest correct value obtainable at this point (full soak_total, since
++                # calibration hasn't run yet) -- see the big comment above for why a MORE current
++                # value can't be computed here, and why the 1s follow-up below is what actually
++                # corrects it again once calibration's real duration is known.
+                 { show_ui(state.get("soak_total", 0)|float|int) }
+ 
++                # CALIBRATE_TOOL_OFFSETS/KOMB don't need this gate to already be past any
++                # particular nozzle temp -- both manage their own heating internally
++                # (tools_calibrate.cfg's own M104/M109, KOMB.cfg's own
++                # SET_HEATER_TEMPERATURE/TEMPERATURE_WAIT).
+                 PRINTER_HEATSOAK_PARK
+-                SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=state VALUE="{state}"
++                SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=state VALUE="{state}"
+                 UPDATE_DELAYED_GCODE ID=_HEATSOAK_UPDATE DURATION=1
+             {% endif %}
+         {% endif %}
+@@ -1161,7 +1078,7 @@
+         {% set noz     = params.EXTRUDER|default(params.EXTRUDER_TEMP|default(params.TOOL_TEMP|default(200)))|float %}
+         {% set chamber = params.CHAMBER|default(params.CHAMBER_TEMP|default(0))|float %}
+ 
+-        {action_respond_info("PRINT_START: bed=%sC  nozzle=%sC  chamber=%sC  file=%s" % (
++        {action_respond_info("START_PRINT: bed=%sC  nozzle=%sC  chamber=%sC  file=%s" % (
+             bed|string, noz|string, chamber|string,
+             printer.print_stats.filename|default("unknown")))}
+ 
+@@ -1193,19 +1110,16 @@
+             should_soak|string, dur_min|round(1)|string, chamber_is_hot|string))}
+ 
+         {% if not should_soak %}
+-            SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=heatsoak_active VALUE=0
+-            # ==== MMU SUPPORT SECTION HOOK (no-soak path) ====================
+-            # If your printer has an MMU, call your pre-home safety check and
+-            # gate/tool precheck here, before PRINT_START_BASE. See the MMU
+-            # SUPPORT SECTION near the bottom of this file. Delete this
+-            # comment block if you don't have an MMU.
+-            # ===================================================================
++            SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=heatsoak_active VALUE=0
++            # No START_PRINT_BASE/MMU section on Boss -- calls straight into Boss's own
++            # _START_PRINT (sovol-macros.cfg), forwarding the raw slicer params unchanged
++            # (this path is synchronous, so nothing needs to survive in `state`).
+             # EXTRUSION_MODE_RESET (2026-10-05): start the printer's own sequence in
+             # relative extrusion with E zeroed, whatever ran before (a filament load
+             # can leave M82). The slicer's own M83 only comes after this.
+             M83
+             G92 E0
+-            PRINT_START_BASE {rawparams}
++            _START_PRINT {rawparams}
+ 
+         {% else %}
+             {% set raw_soak = cfg.soak_sec_per_print_min|float * dur_min %}
+@@ -1215,6 +1129,11 @@
+             # Store decoded named fields, not the slicer's raw {rawparams}
+             # string -- see CHANGELOG at the top of this file for why. Add
+             # whatever named params your own slicer profile passes.
++            #
++            # Boss-specific: TOOL/TOOL_TEMP/T0_TEMP../CALIBRATE are needed by Boss's own
++            # _START_PRINT and PRINTER_HEATSOAK_PARK (see both below) -- the generic template
++            # doesn't know about these on its own, so they're captured here explicitly, the
++            # same way LAYER/FILAMENT/etc. already are.
+             {% set _ = state.update({
+                 "bed":            bed|float,
+                 "noz":            noz|float,
+@@ -1228,10 +1147,19 @@
+                 "surface":        params.SURFACE|default("")|string,
+                 "oapa":           params.OAPA|default("")|string,
+                 "dmgcc":          params.DMGCC|default("")|string,
++                "tool":           params.TOOL|default(0)|int,
++                "tool_temp":      params.TOOL_TEMP|default(noz)|int,
++                "calibrate":      params.CALIBRATE|default(1)|int,
++                "t0_temp":        params.T0_TEMP|default(0)|int,
++                "t1_temp":        params.T1_TEMP|default(0)|int,
++                "t2_temp":        params.T2_TEMP|default(0)|int,
++                "t3_temp":        params.T3_TEMP|default(0)|int,
++                "t4_temp":        params.T4_TEMP|default(0)|int,
++                "t5_temp":        params.T5_TEMP|default(0)|int,
+             }) %}
+ 
+-            SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=heatsoak_active VALUE=1
+-            SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=state VALUE="{state}"
++            SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=heatsoak_active VALUE=1
++            SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=state VALUE="{state}"
+ 
+             SAVE_GCODE_STATE NAME=HEATSOAK_STATE
+ 
+@@ -1242,19 +1170,6 @@
+             {% if printer.toolhead.homed_axes|lower != "xyz" %}
+                 G28
+             {% endif %}
+-
+-            # ==== MMU SUPPORT SECTION HOOK (should-soak path) ================
+-            # If your printer has an MMU, call your pre-home safety check and
+-            # gate/tool precheck HERE -- before BASE_PAUSE/the popup below, not
+-            # after. Some MMU precheck commands (e.g. Happy Hare's
+-            # MMU_CHECK_GATE, called via MMU_START_CHECK) can perform a real
+-            # physical tool load as part of "checking" it, not just a sensor
+-            # read -- running that before the pause keeps it associated with
+-            # print-start setup instead of looking like it's happening mid-
+-            # soak. See the MMU SUPPORT SECTION near the bottom of this file
+-            # for a full worked example (Happy Hare / Tradrack-style MMU).
+-            # Delete this comment block if you don't have an MMU.
+-            # ===================================================================
+ 
+             # THIS IS WHAT ACTUALLY BLOCKS THE PRINT DURING THE SOAK.
+             # Everything above and below this line (popup, countdown,
+@@ -1307,108 +1222,9 @@
+ 
+     SET_GCODE_VARIABLE MACRO={SELF} VARIABLE=state VALUE="{state}"
+ 
+-
+-# =============================================================================
+-#  PRINT_START_BASE  --  machine-specific pre-print sequence
+-# =============================================================================
+-#  Runs after heatsoak completes (or immediately if no soak needed).
+-#  Replace the body with your printer's specific sequence.
+-#  All slicer params are available via params.*
+-# =============================================================================
+-
+-[gcode_macro PRINT_START_BASE]
+-description: Machine-specific pre-print sequence. Runs after heatsoak completes.
+-gcode:
+-    {% set bed = params.BED|default(params.BED_TEMP|default(60))|float %}
+-    {% set noz = params.EXTRUDER|default(params.EXTRUDER_TEMP|default(200))|float %}
+-
+-    {action_respond_info("PRINT_START_BASE: bed=%sC  nozzle=%sC" % (bed|string, noz|string))}
+-
+-    SET_IDLE_TIMEOUT TIMEOUT={printer.configfile.settings.idle_timeout.timeout|int}
+-
+-    # --------------------------------------------------------------------------
+-    #  CUSTOMISE FROM HERE DOWN for your specific machine
+-    # --------------------------------------------------------------------------
+-
+-    # -- Re-home, level, mesh -- always in this order, always HOT, always here --
+-    # Stated as a standing requirement 2026-08-06: a hot final homing of at
+-    # least Z is always required after the soak -- never rely on whatever
+-    # homing happened before/during the soak (e.g. to let a pause macro park
+-    # safely) carrying over as "good enough". On machines with bed leveling
+-    # (QGL, Z-tilt, etc.), that leveling pass must ALSO happen hot, after the
+-    # soak, before the bed mesh. Bed mesh itself must always be done after the
+-    # soak too. On some machines you'll ALSO want an additional COOL rough
+-    # pass done first (before/during the soak, to get close) -- that's fine
+-    # and often free (whatever pre-soak homing the pause needs doubles as it)
+-    # -- but the hot pass after the soak is never optional or skippable.
+-    # Thermal expansion during the soak measurably shifts gantry/frame
+-    # geometry and probe trigger height; anything captured cold doesn't
+-    # reflect the printer's actual hot-running geometry, which defeats a good
+-    # part of why the heatsoak exists.
+-    #
+-    # Concrete gotcha hit on the Rat (RatOS), 2026-08-06: a plain re-home call
+-    # after resume looked sufficient, but RatOS's own leveling step only runs
+-    # "if not <leveling_module>.applied" -- and a homing pass done BEFORE the
+-    # soak (to let PAUSE park) had already flipped that flag true, silently
+-    # skipping the hot leveling pass entirely even though Z itself got
+-    # "re-homed". If your printer has a similar leveling module with its own
+-    # "already applied" state, make sure your post-soak re-home actually
+-    # resets it (e.g. Klipper's z_tilt/quad_gantry_level clear `.applied` on a
+-    # genuine re-home) -- don't just trust that calling a home command is
+-    # equivalent to a fresh check-and-recalibrate.
+-    G28
+-
+-    # Bed mesh -- after re-home/leveling above, still hot.
+-    BED_MESH_CALIBRATE
+-
+-    # Heat to print temperatures
+-    M190 S{bed}
+-    M109 S{noz}
+-
+-    # Purge / prime -- uncomment whichever applies:
+-    # LINE_PURGE          # KAMP
+-    # VORON_PURGE
+-    # SMART_PARK
+-
+-    # If your printer has an MMU, load the initial tool and purge HERE, after
+-    # the nozzle is actually at print temp -- e.g. (Happy Hare):
+-    #   MMU_START_LOAD_INITIAL_TOOL
+-    #   LINE_PURGE
+-    # Do NOT call this from the slicer's start gcode instead -- PRINT_START
+-    # returns almost immediately (it just shows a popup and schedules async
+-    # prep), so the slicer's next line would run essentially immediately too,
+-    # loading filament and purging long before the actual soak/heat-up
+-    # finished. See MMU SUPPORT SECTION below.
+-
+-    G92 E0
+-
+-    # --------------------------------------------------------------------------
+-    #  END CUSTOMISATION
+-    # --------------------------------------------------------------------------
+-
+-
+-# =============================================================================
+-#  CANCEL TEARDOWN -- call from your CANCEL_PRINT (was a wrapper, see below)
+-# =============================================================================
+-#  Whatever CANCEL_PRINT resolves to on your printer (Happy Hare's client
+-#  macros, a stock Klipper CANCEL_PRINT, or your own override) is what
+-#  actually runs when Mainsail's cancel button or any API-level CANCEL_PRINT
+-#  call fires. PRINT_START's own [X] Cancel button (the CANCEL branch above)
+-#  is a SEPARATE code path -- it only runs if someone specifically clicks
+-#  that popup button. Any OTHER cancellation (Mainsail's UI, a raw
+-#  CANCEL_PRINT command) bypasses this macro entirely, leaving its recurring
+-#  _HEATSOAK_UPDATE timer (and any pending _HEATSOAK_PREP) running completely
+-#  unaware the print was cancelled -- which is exactly the "heatsoak still
+-#  firing after cancel" bug this wrapper prevents.
+-#
+-#  (Obsolete since 2026-10-02, kept for history:) If you have another layer
+-#  that defines its own fully-wrapped CANCEL_PRINT (e.g. an MMU's client
+-#  macros), make sure THIS include comes after that one in printer.cfg, so
+-#  rename_existing below captures the fully-wrapped version, not something
+-#  earlier/incomplete in the include chain. -- This advice was wrong: Klipper
+-#  merges same-named sections rather than chaining them. See below.
+-# =============================================================================
+-
++# =============================================================================
++#  CANCEL TEARDOWN -- call from your CANCEL_PRINT
++# =============================================================================
+ 
+ #  2026-10-02 -- REPLACED. This section used to be a same-named
+ #  [gcode_macro CANCEL_PRINT] wrapper (rename_existing:
+@@ -1440,25 +1256,6 @@
+ #  until this hookup is in place.
+ # =============================================================================
+ 
+-[gcode_macro _HEATSOAK_CANCEL_TEARDOWN]
+-description: Stop an active heatsoak (timers, popup, soak fans, saved gcode state). Call first thing in your CANCEL_PRINT. No-op if no soak is active.
+-gcode:
+-    {% set st = printer["gcode_macro PRINT_START"] %}
+-    {% if st.state and (st.state|string) != "{}" and st.heatsoak_active %}
+-        {action_respond_info("Heatsoak: tearing down for CANCEL_PRINT")}
+-        UPDATE_DELAYED_GCODE ID=_HEATSOAK_UPDATE DURATION=0
+-        UPDATE_DELAYED_GCODE ID=_HEATSOAK_PREP DURATION=0
+-        UPDATE_DELAYED_GCODE ID=_HEATSOAK_HEATUP_TICK DURATION=0
+-        UPDATE_DELAYED_GCODE ID=_HEATSOAK_PAUSE_GUARD DURATION=0
+-        RESPOND TYPE=command MSG="action:prompt_end"
+-        SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=heatsoak_active VALUE=0
+-        M106 S0
+-        M107
+-        RESTORE_GCODE_STATE NAME=HEATSOAK_STATE MOVE=0
+-        SET_GCODE_VARIABLE MACRO=PRINT_START VARIABLE=state VALUE="{{}}"
+-    {% endif %}
+-
+-
+ # =============================================================================
+ #  RESUME CHECK -- call from your RESUME: Resume during a soak = Skip
+ # =============================================================================
+@@ -1495,7 +1292,7 @@
+ [gcode_macro _HEATSOAK_RESUME_CHECK]
+ description: Call first thing in your RESUME. During a heatsoak, turns Resume into Skip and stops the rest of your RESUME. No-op otherwise.
+ gcode:
+-    {% set st = printer["gcode_macro PRINT_START"] %}
++    {% set st = printer["gcode_macro START_PRINT"] %}
+     {% if st.state and (st.state|string) != "{}" and st.heatsoak_active %}
+         UPDATE_DELAYED_GCODE ID=_HEATSOAK_RESUME_AS_SKIP DURATION=0.1
+         # Separate macro: an error raised in THIS macro's own template would
+@@ -1510,109 +1307,53 @@
+ 
+ [delayed_gcode _HEATSOAK_RESUME_AS_SKIP]
+ gcode:
+-    PRINT_START SKIP=1
+-
+-
+-# =============================================================================
+-#  MMU SUPPORT SECTION  --  OPTIONAL, delete entirely if you don't have an MMU
+-# =============================================================================
+-#  Background: this whole section exists because of what happened deploying
+-#  this template on a Voron 0 with a Tradrack MMU / Happy Hare v4
+-#  (2026-08-04/05). Two things specific to MMU-equipped printers came up
+-#  that a non-MMU printer will never hit:
+-#
+-#  1. Happy Hare's MMU_START_CHECK (gate/tool precheck, called via
+-#     MMU_CHECK_GATE) can perform a REAL physical tool select-and-load as
+-#     part of "checking" the initial tool, not just a sensor read -- this
+-#     happens when Happy Hare's own internal is_printing() state hasn't
+-#     flipped to "printing" yet. Calling it needs to happen before the
+-#     popup/pause below (the MMU SUPPORT SECTION HOOK comments in the INIT
+-#     branch above mark exactly where), so the real toolchange this can
+-#     trigger stays visually tied to print-start setup, not mid-soak.
+-#
+-#  2. Filament can be left sitting at a gate sensor from a previous failed
+-#     load/unload. Homing the selector across the gate array while filament
+-#     is caught in its path is a real jam risk, so a pre-home safety check
+-#     is needed before ANY MMU homing happens.
+-#
+-#  The example below is written for Happy Hare specifically (MMU_CHECK_GATE,
+-#  MMU_TEST_HOMING_MOVE, a filament_switch_sensor named
+-#  "unit0:mmu_shared_exit", a SERVO_CUTTER_ACTION cutter macro) -- adjust the
+-#  sensor name and cutter/trim command for your actual MMU (ERCF, ERCFv2,
+-#  ATC, etc.) and hardware.
+-# =============================================================================
+-
+-[gcode_macro _MMU_CLEAR_BEFORE_HOME]
+-description: Retract+trim any filament stuck at the shared gate sensor before MMU homing is allowed to run. Cutter only fires once the sensor is freshly confirmed clear. Sets last_check_ok instead of raising directly, so callers (PRINT_START) get a chance to tear down their own state cleanly before aborting.
+-variable_last_check_ok: 1
++    START_PRINT SKIP=1
++
++
++
++# =============================================================================
++#  (cancel teardown macro -- see the CANCEL TEARDOWN section above)
++# =============================================================================
++
++[gcode_macro _HEATSOAK_CANCEL_TEARDOWN]
++description: Stop an active heatsoak (timers, popup, soak fans, saved gcode state). Call first thing in your CANCEL_PRINT. No-op if no soak is active.
+ gcode:
+-    # EDIT: replace with your MMU's actual gate-sensor object name.
+-    {% set sensor_name = "filament_switch_sensor unit0:mmu_shared_exit" %}
+-    SET_GCODE_VARIABLE MACRO=_MMU_CLEAR_BEFORE_HOME VARIABLE=last_check_ok VALUE=1
+-
+-    {% if printer[sensor_name].filament_detected %}
+-        RESPOND TYPE=echo MSG="Pre-home check: filament present at shared gate sensor -- clearing before MMU homes"
+-
+-        # EDIT: replace with your MMU's actual retract command/endstop name.
+-        MMU_TEST_HOMING_MOVE MOVE=-1200 MOTOR=gear ENDSTOP=mmu_shared_exit STOP_ON_ENDSTOP=-1 WAIT=1
+-        {% set cleared = not printer[sensor_name].filament_detected %}
+-
+-        {% if not cleared %}
+-            RESPOND TYPE=echo MSG="Pre-home check: still triggered after first retract (-1200mm), extending"
+-            MMU_TEST_HOMING_MOVE MOVE=-600 MOTOR=gear ENDSTOP=mmu_shared_exit STOP_ON_ENDSTOP=-1 WAIT=1
+-            {% set cleared = not printer[sensor_name].filament_detected %}
+-        {% endif %}
+-
+-        {% if cleared %}
+-            RESPOND TYPE=echo MSG="Pre-home check: sensor confirmed clear -- trimming end"
+-            # EDIT: replace with your MMU's actual cutter/trim macro, or
+-            # delete this line if your MMU has no cutter.
+-            SERVO_CUTTER_ACTION
+-        {% else %}
+-            RESPOND TYPE=error MSG="Pre-home safety check FAILED: filament still detected at shared gate sensor after clearing attempts. Refusing to home MMU -- manual check required."
+-            SET_GCODE_VARIABLE MACRO=_MMU_CLEAR_BEFORE_HOME VARIABLE=last_check_ok VALUE=0
+-        {% endif %}
++    {% set st = printer["gcode_macro START_PRINT"] %}
++    {% if st.state and (st.state|string) != "{}" and st.heatsoak_active %}
++        {action_respond_info("Heatsoak: tearing down for CANCEL_PRINT")}
++        UPDATE_DELAYED_GCODE ID=_HEATSOAK_UPDATE DURATION=0
++        UPDATE_DELAYED_GCODE ID=_HEATSOAK_PREP DURATION=0
++        UPDATE_DELAYED_GCODE ID=_HEATSOAK_HEATUP_TICK DURATION=0
++        UPDATE_DELAYED_GCODE ID=_HEATSOAK_PAUSE_GUARD DURATION=0
++        RESPOND TYPE=command MSG="action:prompt_end"
++        SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=heatsoak_active VALUE=0
++        M106 S0
++        M107
++        RESTORE_GCODE_STATE NAME=HEATSOAK_STATE MOVE=0
++        SET_GCODE_VARIABLE MACRO=START_PRINT VARIABLE=state VALUE="{{}}"
+     {% endif %}
+ 
+-# To wire this in, add to the two "MMU SUPPORT SECTION HOOK" spots in
+-# PRINT_START's INIT branch above (both the should-soak and no-soak paths):
+-#
+-#     _MMU_CLEAR_BEFORE_HOME
+-#     {% if not printer["gcode_macro _MMU_CLEAR_BEFORE_HOME"].last_check_ok %}
+-#         {# on the should-soak path only: tear down heatsoak_active/state
+-#            and zero_soak_fans()/RESTORE_GCODE_STATE like the Cancel button
+-#            does first, so nothing is left dangling -- see the Voron 0
+-#            deployment for the full teardown block #}
+-#         {action_raise_error("Heatsoak: aborting -- MMU pre-home check failed")}
+-#     {% endif %}
+-#     MMU_START_CHECK
+-#
+-# (MMU_START_CHECK itself is a Happy Hare built-in command, not defined in
+-# this file -- it ships with Happy Hare's own macros.)
+-
+-# SLICER_COMPAT_ALIAS (optional) ----------------------------------------------
+-#  Slicer profiles call either START_PRINT or PRINT_START. If yours calls the
+-#  one your printer DOESN'T define, Klipper prints "Unknown command" and keeps
+-#  going -- skipping the whole start sequence (mesh, Z-offset, soak) without
+-#  stopping the print. Uncomment ONLY if START_PRINT is not already defined
+-#  anywhere in your config: Klipper merges same-named sections instead of
+-#  erroring, so this would silently replace an existing START_PRINT.
+-#  (If you renamed the entry to START_PRINT, flip the two names around.)
+-#  With no temps passed (stock slicer line), BED_TEMP/EXTRUDER_TEMP come from
+-#  the current heater targets so the soak still sees real temps.
+-#
+-# [gcode_macro START_PRINT]
+-# description: Slicer-compat alias for PRINT_START
+-# gcode:
+-#     {% set extra = "" %}
+-#     {% set internal = params.TICK is defined or params.SKIP is defined or params.CANCEL is defined or params.HEATUP_TICK is defined %}
+-#     {% if not internal %}
+-#         {% if params.BED is not defined and params.BED_TEMP is not defined and printer.heater_bed.target|float > 0 %}
+-#             {% set extra = extra ~ " BED_TEMP=" ~ printer.heater_bed.target|int %}
+-#         {% endif %}
+-#         {% if params.EXTRUDER is not defined and params.EXTRUDER_TEMP is not defined and params.TOOL_TEMP is not defined and printer.extruder.target|float > 0 %}
+-#             {% set extra = extra ~ " EXTRUDER_TEMP=" ~ printer.extruder.target|int %}
+-#         {% endif %}
+-#     {% endif %}
+-#     {action_respond_info("START_PRINT -> PRINT_START " ~ rawparams ~ extra)}
+-#     PRINT_START {rawparams}{extra}
++
++# SLICER_COMPAT_ALIAS (2026-10-03) ------------------------------------------------
++#  Slicer profiles call either START_PRINT or PRINT_START. Klipper treats an
++#  unknown one as "Unknown command" and keeps printing, silently skipping the
++#  whole start sequence. These aliases forward to this printer's real entry
++#  (START_PRINT). With no temps passed (stock slicer line), BED_TEMP/EXTRUDER_TEMP
++#  come from the current heater targets. Internal calls (TICK/SKIP/...) use
++#  the real entry name and never come through here.
++
++[gcode_macro PRINT_START]
++description: Slicer-compat alias for START_PRINT
++gcode:
++    {% set extra = "" %}
++    {% set internal = params.TICK is defined or params.SKIP is defined or params.CANCEL is defined or params.HEATUP_TICK is defined %}
++    {% if not internal %}
++        {% if params.BED is not defined and params.BED_TEMP is not defined and printer.heater_bed.target|float > 0 %}
++            {% set extra = extra ~ " BED_TEMP=" ~ printer.heater_bed.target|int %}
++        {% endif %}
++        {% if params.EXTRUDER is not defined and params.EXTRUDER_TEMP is not defined and params.TOOL_TEMP is not defined and printer.extruder.target|float > 0 %}
++            {% set extra = extra ~ " EXTRUDER_TEMP=" ~ printer.extruder.target|int %}
++        {% endif %}
++    {% endif %}
++    {action_respond_info("PRINT_START -> START_PRINT " ~ rawparams ~ extra)}
++    START_PRINT {rawparams}{extra}

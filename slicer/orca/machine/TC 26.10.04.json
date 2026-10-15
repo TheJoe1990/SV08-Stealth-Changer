@@ -1,0 +1,221 @@
+{
+    "bed_custom_texture": "C:\\\\Users\\\\yamah\\\\Downloads\\\\orca_toolchanger_caution_texture_fine_white_grid.png",
+    "before_layer_change_gcode": "TIMELAPSE_TAKE_FRAME\nG92 E0",
+    "best_object_pos": "0.5,0.6",
+    "deretraction_speed": [
+        "30",
+        "30",
+        "30",
+        "30"
+    ],
+    "extruder_clearance_height_to_lid": "345",
+    "extruder_colour": [
+        "#FCE94F",
+        "#FCE94F",
+        "#FCE94F",
+        "#FCE94F"
+    ],
+    "extruder_offset": [
+        "0x0",
+        "0x0",
+        "0x0",
+        "0x0"
+    ],
+    "from": "User",
+    "inherits": "MyKlipper 0.4 nozzle",
+    "long_retractions_when_cut": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "machine_end_gcode": "END_PRINT",
+    "machine_max_acceleration_extruding": [
+        "10000",
+        "20000"
+    ],
+    "machine_max_acceleration_retracting": [
+        "10000",
+        "5000"
+    ],
+    "machine_max_acceleration_x": [
+        "10000",
+        "20000"
+    ],
+    "machine_max_acceleration_y": [
+        "10000",
+        "20000"
+    ],
+    "machine_max_acceleration_z": [
+        "1000",
+        "200"
+    ],
+    "machine_max_jerk_e": [
+        "10",
+        "2.5"
+    ],
+    "machine_max_jerk_x": [
+        "30",
+        "9"
+    ],
+    "machine_max_jerk_y": [
+        "30",
+        "9"
+    ],
+    "machine_max_jerk_z": [
+        "0.5",
+        "0.4"
+    ],
+    "machine_max_speed_e": [
+        "200",
+        "25"
+    ],
+    "machine_max_speed_z": [
+        "80",
+        "12"
+    ],
+    "machine_pause_gcode": "M600",
+    "machine_start_gcode": "{if enable_prime_tower}_PRIME_TOWER_AREA X={wipe_tower_x[0]} Y={wipe_tower_y[0]} W={prime_tower_width} B={prime_tower_brim_width}{endif}\nSTART_PRINT TOOL_TEMP={first_layer_temperature[initial_tool]} {if is_extruder_used[0]}T0_TEMP={first_layer_temperature[0]} T0_IDLE_TEMP={(idle_temperature[0] == 0 ? (nozzle_temperature[0] + standby_temperature_delta) : (idle_temperature[0]))}{endif} {if is_extruder_used[1]}T1_TEMP={first_layer_temperature[1]} T1_IDLE_TEMP={(idle_temperature[1] == 0 ? (nozzle_temperature[1] + standby_temperature_delta) : (idle_temperature[1]))}{endif} {if is_extruder_used[2]}T2_TEMP={first_layer_temperature[2]} T2_IDLE_TEMP={(idle_temperature[2] == 0 ? (nozzle_temperature[2] + standby_temperature_delta) : (idle_temperature[2]))}{endif} {if is_extruder_used[3]}T3_TEMP={first_layer_temperature[3]} T3_IDLE_TEMP={(idle_temperature[3] == 0 ? (nozzle_temperature[3] + standby_temperature_delta) : (idle_temperature[3]))}{endif} {if is_extruder_used[4]}T4_TEMP={first_layer_temperature[4]} T4_IDLE_TEMP={(idle_temperature[4] == 0 ? (nozzle_temperature[4] + standby_temperature_delta) : (idle_temperature[4]))}{endif} {if is_extruder_used[5]}T5_TEMP={first_layer_temperature[5]} T5_IDLE_TEMP={(idle_temperature[5] == 0 ? (nozzle_temperature[5] + standby_temperature_delta) : (idle_temperature[5]))}{endif} BED_TEMP=[first_layer_bed_temperature] TOOL=[initial_tool] CHAMBER_TEMP=[chamber_temperature] FILAMENT=[filament_type]",
+    "machine_tool_change_time": "31",
+    "max_layer_height": [
+        "0.32",
+        "0.32",
+        "0.32",
+        "0.32"
+    ],
+    "min_layer_height": [
+        "0.08",
+        "0.08",
+        "0.08",
+        "0.08"
+    ],
+    "name": "TC 26.10.04",
+    "nozzle_diameter": [
+        "0.4",
+        "0.4",
+        "0.4",
+        "0.4"
+    ],
+    "print_host": "",
+    "printable_area": [
+        "0x2",
+        "354x2",
+        "354x327",
+        "0x327"
+    ],
+    "printable_height": "345",
+    "printer_settings_id": "TC 26.10.04",
+    "purge_in_prime_tower": "0",
+    "retract_before_wipe": [
+        "0%",
+        "0%",
+        "0%",
+        "0%"
+    ],
+    "retract_length_toolchange": [
+        "2",
+        "2",
+        "2",
+        "2"
+    ],
+    "retract_lift_above": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "retract_lift_below": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "retract_lift_enforce": [
+        "All Surfaces",
+        "All Surfaces",
+        "All Surfaces",
+        "All Surfaces"
+    ],
+    "retract_restart_extra": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "retract_restart_extra_toolchange": [
+        "0",
+        "0",
+        "0",
+        "0"
+    ],
+    "retract_when_changing_layer": [
+        "1",
+        "1",
+        "1",
+        "1"
+    ],
+    "retraction_distances_when_cut": [
+        "18",
+        "18",
+        "18",
+        "18"
+    ],
+    "retraction_length": [
+        "0.5",
+        "0.5",
+        "0.5",
+        "0.5"
+    ],
+    "retraction_minimum_travel": [
+        "1",
+        "1",
+        "1",
+        "1"
+    ],
+    "retraction_speed": [
+        "35",
+        "35",
+        "35",
+        "35"
+    ],
+    "single_extruder_multi_material": "0",
+    "thumbnails": "300x300/PNG, 400x300/PNG, 32x32/PNG",
+    "tool_change_temprature_wait": "0",
+    "travel_slope": [
+        "3",
+        "3",
+        "3",
+        "3"
+    ],
+    "version": "2.3.0.3",
+    "wipe": [
+        "1",
+        "1",
+        "1",
+        "1"
+    ],
+    "wipe_distance": [
+        "2",
+        "2",
+        "2",
+        "2"
+    ],
+    "z_hop": [
+        "0.4",
+        "0.4",
+        "0.4",
+        "0.4"
+    ],
+    "z_hop_types": [
+        "Spiral Lift",
+        "Spiral Lift",
+        "Spiral Lift",
+        "Spiral Lift"
+    ],
+    "z_hop_when_prime": [
+        "1",
+        "1",
+        "1",
+        "1"
+    ]
+}

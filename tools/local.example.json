@@ -1,0 +1,8 @@
+{
+  "host": "biqu@<printer-ip>",
+  "ssh_key": "~/.ssh/<key>",
+  "lan_placeholders": {
+    "<printer-ip>": "<printer-ip>",
+    "<spoolman-ip>": "<spoolman-host>"
+  }
+}

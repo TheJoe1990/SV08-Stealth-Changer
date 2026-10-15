@@ -1,0 +1,27 @@
+--- upstream/files-used/config/options/lcd/sovol-menu.cfg @ 2b6416e
++++ config/options/lcd/sovol-menu.cfg
+@@ -27,7 +27,7 @@
+ ### menu tune ###
+ [menu __main __tune]
+ type: list
+-enable: {printer.print_stats.state == "paused" or printer.idle_timeout.state == "Printing"}
++enable: {printer.print_stats.state == "paused" or printer.idle_timeout.state != "Printing"}
+ name: Tune
+ index: 1
+ 
+@@ -140,13 +140,13 @@
+ # yay dimming - MON5TERMATT
+ [menu __main __tune __ledonoff]
+ type: input
+-enable: {'led main_led' in printer}
++enable: {'output_pin main_led' in printer}
+ name: Dim LED:    {'%3d%s' % (menu.input*100,'%') if menu.input else 'OFF'}
+ input: {printer['output_pin main_led'].value}
+ input_min: 0.0
+ input_max: 1.0
+ input_step: 0.01
+-gcode: SET_LED LED=main_led WHITE={menu.input}
++gcode: SET_PIN PIN=main_led VALUE={menu.input}
+ 
+ [menu __main __tune __save]
+ type: list

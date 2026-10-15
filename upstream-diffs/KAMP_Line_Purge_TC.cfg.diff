@@ -1,0 +1,18 @@
+--- upstream/Configuration/Line_Purge.cfg @ 997838c
++++ config/KAMP_Line_Purge_TC.cfg
+@@ -1,3 +1,6 @@
++# 2026-10-05 Boss-local copy of KAMP/Line_Purge.cfg (KAMP git checkout left untouched).
++# Change: ignore the PRIME_TOWER_AREA object (added by _PRIME_TOWER_AREA so the adaptive mesh covers the
++# prime tower) when choosing park/purge spots -- it put Smart Park at X-6 and broke the first tool select.
+ [gcode_macro LINE_PURGE]
+ description: A purge macro that adapts to be near your actual printed objects
+ gcode:
+@@ -24,7 +27,7 @@
+ 
+ 
+     # Calculate purge origins and centers from objects
+-    {% set all_points = printer.exclude_object.objects | map(attribute='polygon') | sum(start=[]) %}    # Get all object points
++    {% set all_points = printer.exclude_object.objects | rejectattr('name', 'equalto', 'PRIME_TOWER_AREA') | map(attribute='polygon') | sum(start=[]) %}    # Get all object points
+     {% set purge_x_min = (all_points | map(attribute=0) | min | default(0)) %}                          # Object x min
+     {% set purge_x_max = (all_points | map(attribute=0) | max | default(0)) %}                          # Object x max
+     {% set purge_y_min = (all_points | map(attribute=1) | min | default(0)) %}                          # Object y min

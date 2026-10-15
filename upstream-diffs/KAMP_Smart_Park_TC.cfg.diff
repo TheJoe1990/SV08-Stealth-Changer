@@ -1,0 +1,29 @@
+--- upstream/Configuration/Smart_Park.cfg @ 997838c
++++ config/KAMP_Smart_Park_TC.cfg
+@@ -1,3 +1,6 @@
++# 2026-10-05 Boss-local copy of KAMP/Smart_Park.cfg (KAMP git checkout left untouched).
++# Change: ignore the PRIME_TOWER_AREA object (added by _PRIME_TOWER_AREA so the adaptive mesh covers the
++# prime tower) when choosing park/purge spots -- it put Smart Park at X-6 and broke the first tool select.
+ [gcode_macro SMART_PARK]
+ description: Parks your printhead near the print area for pre-print hotend heating.
+ gcode:
+@@ -10,7 +13,7 @@
+     {% set center_y = printer.toolhead.axis_maximum.y / 2 | float %}                                                                # Create center point of y for fallback
+     {% set axis_minimum_x = printer.toolhead.axis_minimum.x | float %}
+     {% set axis_minimum_y = printer.toolhead.axis_minimum.y | float %}
+-    {% set all_points = printer.exclude_object.objects | map(attribute='polygon') | sum(start=[]) %}                                # Gather all object points
++    {% set all_points = printer.exclude_object.objects | rejectattr('name', 'equalto', 'PRIME_TOWER_AREA') | map(attribute='polygon') | sum(start=[]) %}                                # Gather all object points
+     {% set x_min = all_points | map(attribute=0) | min | default(center_x) %}                                                       # Set x_min from smallest object x point
+     {% set y_min = all_points | map(attribute=1) | min | default(center_y) %}                                                       # Set y_min from smallest object y point
+     {% set travel_speed = (printer.toolhead.max_velocity) * 60 | float %}                                                           # Set travel speed from config
+@@ -18,8 +21,8 @@
+     {% if purge_margin > 0 and x_min != center_x and y_min != center_y %}                                                           # If objects are detected and purge margin 
+         {% set x_min = [ x_min - purge_margin , x_min ] | min %}                                                                    # value is greater than 0, move
+         {% set y_min = [ y_min - purge_margin , y_min ] | min %}                                                                    # to purge location + margin
+-        {% set x_min = [ x_min , axis_minimum_x ] | max %}
+-        {% set y_min = [ y_min , axis_minimum_y ] | max %}
++        {% set x_min = [ x_min , axis_minimum_x + 5.0 ] | max %}                                                                 # 2026-10-05: 5 mm inside the limit so tool offsets cannot push the park move out of range
++        {% set y_min = [ y_min , axis_minimum_y + 5.0 ] | max %}
+     {% endif %}
+ 
+                                                                                                                                     # Verbose park location

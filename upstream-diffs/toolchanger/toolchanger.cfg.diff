@@ -1,0 +1,575 @@
+--- upstream/examples/dock location/fixed/toolchanger-error-handling.cfg @ fbcd211
++++ config/toolchanger/toolchanger.cfg
+@@ -1,5 +1,389 @@
++
++[include dock_tuner.cfg]
++[include tdp_dock_autotune.cfg]
++[include tool_drop_detection.cfg]
++[include offsets_adjust_record.cfg]
++[include heater_power_distributor.cfg]
++[include tc_shapers.cfg]
++
++
++[gcode_macro _TOOLCHANGE_FAN]
++description: "Save/force/restore per-tool part fan during toolchanges"
++variable_saved_speed: 0.0
++gcode:
++    {% set tn = params.TN|int %}
++    # Logical fan name (what SET_FAN_SPEED uses)
++    {% set fan_logical = "T" ~ tn ~ "_partfan" %}
++    # Object name in printer[] (section name)
++    {% set fan_obj = "fan_generic " ~ fan_logical %}
++
++    {% if 'SAVE' in params %}
++        # Save current fan speed (0.0–1.0) for this tool
++        SET_GCODE_VARIABLE MACRO=_TOOLCHANGE_FAN VARIABLE=saved_speed VALUE={ printer[fan_obj].speed|float }
++    {% elif 'FULL' in params %}
++        # Force this tool's fan to 100%
++        SET_FAN_SPEED FAN={fan_logical} SPEED=1.0
++    {% elif 'RESTORE' in params %}
++        # Restore previously saved fan speed
++        {% set s = saved_speed|float %}
++        SET_FAN_SPEED FAN={fan_logical} SPEED={ s }
++    {% endif %}
++
++
++
++[rounded_path]
++resolution:         0.25
++#algorithm:          bezier
++replace_g0:         False
++
+ [toolchanger]
+-
++require_tool_present: False # Set to true to disable the UNSELECT_TOOL command
++verify_tool_pickup: False # for automatic verify (not through gcode) change this to true.
++on_axis_not_homed: home # home|abort
++initialize_on: manual   # manual|first-use|homing
++uses_axis: xyz # just ensures that these axis are homed before toolchanges. for liftbar, maybe change this?
++t_command_restore_axis: XYZ
++
++params_safe_y: 150  # safe distance when changing (moving up and down) 
++params_close_y: 25  # safe distance to tools without tool attatched
++
++params_fast_speed: 5000 # Go as fast as we can
++params_path_speed: 250 # 20mm/s for the actual change
++
++# size of your tool, used for some calcs/obstacle avoidance/appraoches.
++params_tool_size: { 'x': 60,
++                    'y': 60,
++                    'z': 90, }
++                    
++# CHANGE THIS!!! Set the path for your printer, see tool_paths.md
++# (this is for a stealthchanger)
++# Path positions relative to the park position
++# use x,y,z; f= multiplier to path speed; verify= Verify tool detected at end of the move.
++params_dropoff_path: [{'z': 3.5,  'y': 4, 'f': 3.0},
++                      {'z': 2,    'y': 1, 'f': 2.0},
++                      {'z': 1,    'y': 0, 'f': 1.0},
++                      {'z': 0,    'y': 0, 'f': 0.8},
++                      {'z': -12,  'y': 0, 'f': 3}]
++
++params_pickup_path:  [{'z': -12,  'y': 2, 'f': 3.0},
++                      {'z': -10,  'y': 0, 'f': 2.0},
++                      {'z': -5,   'y': 0, 'f': 1.0},
++                      {'z': 1,    'y': 0, 'f': 0.75, 'verify': 1},
++                      {'z': 2,    'y': 2, 'f': 1.25},
++                      {'z': 3,    'y': 5, 'f': 2}]
++
++
++# Parking position - per tool
++# params_park_x: 142.2
++# params_park_y: -6.0
++# params_park_z: 308.2
++
++# Default shaper params
++params_input_shaper_freq_x: 0
++params_input_shaper_freq_y: 0
++
++before_change_gcode:
++    {% set tn = "T"+(tool.tool_number|string) %}
++    {% if printer["gcode_macro " + tn ] %}
++       SET_GCODE_VARIABLE MACRO={tn} VARIABLE=color VALUE="''"
++    {% endif %}
++
++after_change_gcode:
++    # 2026-10-04: bill filament to the newly mounted tool spool (see spoolman.cfg)
++    _TC_SYNC_SPOOL T={tool.tool_number}
++    {% set tn = "T"+(tool.tool_number|string) %}
++    {% if printer["gcode_macro " + tn ] %}
++       SET_GCODE_VARIABLE MACRO={tn} VARIABLE=color VALUE="'c44'"
++    {% endif %}
++    {% if tool.params_input_shaper_freq_x|float > 0 and tool.params_input_shaper_freq_y|float > 0 %}
++      SET_INPUT_SHAPER SHAPER_FREQ_X={tool.params_input_shaper_freq_x} SHAPER_FREQ_Y={tool.params_input_shaper_freq_y}
++    {% endif %}
++
++
++dropoff_gcode:
++    # ─── get all our variables from the old tool
++    {% set th               = printer.toolhead %}
++    {% set cur              = th.position %}
++    {% set lim_min, lim_max = th.axis_minimum, th.axis_maximum %} 
++    {% set close_y_force    = tool.params_close_y|float %}
++    {% set safe_y_force     = tool.params_safe_y|float %}
++    {% set path_speed       = tool.params_path_speed|float %}
++    {% set tool_size        = tool.params_tool_size|default({'x': 60, 'y': 60, 'z': 90}) %}  
++    {% set min_D            = tool.params_min_D|default(25)|float %}
++    {% set fast             = tool.params_fast_speed|float %}
++    {% set accel            = tool.params_fast_accel|default(printer.configfile.settings.printer.max_accel)|float %}
++    {% set path             = tool.params_dropoff_path %}
++    {% set dock, start      = {}, {} %}
++    {% for ax in ('x', 'y', 'z') %}
++        {% set pos = tool['params_park_' ~ ax]|float %}
++        {% set _ = dock.update( { ax: pos } ) %}
++        {% set _ = start.update( { ax: pos + path[0].get(ax, 0)|float } ) %}
++    {% endfor %}
++
++    # Are we actually in a printing state?
++    {% set printing = printer.print_stats.state|lower == 'printing' %}
++
++    # If printing, save current tool fan speed and force 100% during the tool dropoff
++    {% if printing and tool.extruder %}
++        _TOOLCHANGE_FAN TN={tool.tool_number} SAVE=1
++        _TOOLCHANGE_FAN TN={tool.tool_number} FULL=1
++    {% endif %}
++
++    {%- macro try_add_param(axis, path_step) -%} # adds " X12.5" for example
++        {(' ' ~ axis|upper ~ (dock[axis] + path_step[axis])) if axis in path_step else ''}
++    {%- endmacro -%}
++
++    # ╭────────────────────────── EXPLAIN ────────────────────────────╮
++    # |  why tool size, why "safe_y_force" and not just "safe_y?"     |
++    # |  we clamp the safe_y because if its too low,                  |
++    # |  wed smash into docks. Similarly for the other side,          |
++    # |  we similarly clamp the umbilicals side, this lets us pick    |
++    # |  a value which works (while also avoiding unnecicary moves)   |
++    # |                                                               | 
++    # |         (dock.y + tool_size.y)                                | 
++    # |               (approach)                                      | 
++    # |     (Dock)|     /           <\ (umbilicals)                   | 
++    # | (dock.y ^)||_| <*            | (^ lim_max.y - tool_size.y)    |     
++    # |           |                  |                                |     
++    # |           |                  |                                | 
++    # |           | 0 ---> *  <- 350 |                                |         
++    # |                 (cur.y)                                       | 
++    # ╰───────────────────────────────────────────────────────────────╯
++
++    {% set retreat_y  = [[cur.y, safe_y_force, (dock.y + tool_size.y)]|max, lim_max.y - tool_size.y]|min %}
++    {% set approach_y = dock.y + tool_size.y|float %}
++    {% set close_y    = [(dock.y + path[-1].get('y', 0)|float) + 2, close_y_force]|max %}
++
++    M82
++    G90
++
++    # ─── EXPERIMENTAL 2026-09-14: a sharp, fast, small +Y move as the very first motion
++    # of the dropoff, before anything else (even the Z lift) -- goal is to snap off any
++    # stringy/wet filament still connecting the nozzle to the prime tower via inertia,
++    # rather than dragging it along into the rest of the dropoff path. Plain G1, not
++    # ROUNDED_G0 -- rounding/blending the corner works against an inertia-based snap,
++    # which wants an abrupt start, not a smoothed curve. Direction is a simple fixed
++    # guess (+Y, 5mm, max velocity) rather than computed from the prime tower's actual
++    # position -- deliberately simple to test first; revisit with the tower-relative
++    # direction approach discussed if this isn't reliable enough. Clamped to
++    # lim_max.y so it can't be commanded past the axis limit.
++    G1 Y{ [cur.y + 5, lim_max.y]|min } F{ printer.toolhead.max_velocity|float * 60 }
++
++    SET_VELOCITY_LIMIT ACCEL={ accel }
++
++    # ─── Move up to the dock and drop it off
++    G0 Z{ [cur.z + 1.0, lim_max.z]|min } F{ fast }
++
++    ROUNDED_G0 Y={ retreat_y }   D=50    F={ fast }
++
++    {% if (dock.x - cur.x)|abs >= min_D %}
++        # ─── Join XZ segment if X is too short (corner ends up too sharp)
++        ROUNDED_G0 X={ dock.x }  D={ ((safe_y_force / 4.0) * 3.0)|int } F={ fast }
++        ROUNDED_G0 Z={ start.z } D={ (safe_y_force / 2.1)|int }         F={ fast }
++    {% else %}
++        ROUNDED_G0 X={ dock.x } Z={ start.z } D={ ((safe_y_force / 4.0) * 3.0)|int } F={ fast }
++    {% endif %}
++
++    ROUNDED_G0 Y={ approach_y } D=10   F={ fast }
++    ROUNDED_G0 Y={ start.y }    D=0    F={ fast/2 }
++
++    STOP_TOOL_PROBE_CRASH_DETECTION
++
++    # ─── run path
++    {% for step in path %}
++        G0{try_add_param('x', step)}{try_add_param('y', step)}{try_add_param('z', step)} F{path_speed * step.get('f', 1.0)|float}
++    {% endfor %}
++
++    {"SET_STEPPER_ENABLE STEPPER=" ~ tool.extruder ~ " ENABLE=0" if tool.extruder and 'extruder' in tool.extruder else ''}
++    {% if pickup_tool is none %}
++        G0 Y{ retreat_y } F{ fast }
++    {% else %}
++        G0 Y{ close_y } F{ fast }
++    {% endif %}
++
++    SET_VELOCITY_LIMIT ACCEL={ th.max_accel }
++
++    # Restore fan speed after dropoff if we changed it
++    {% if printing and tool.extruder %}
++        _TOOLCHANGE_FAN TN={tool.tool_number} RESTORE=1
++    {% endif %}
++
++
++
++pickup_gcode:
++    # ─── get all variables for the tool we want to pick up
++    {% set th               = printer.toolhead %}
++    {% set cur              = th.position %}
++    {% set lim_min, lim_max = th.axis_minimum, th.axis_maximum %} 
++    {% set tool_size        = tool.params_tool_size|default({'x': 60, 'y': 60, 'z': 90}) %}
++    {% set min_D            = tool.params_min_D|default(25)|float %}
++    {% set close_y_force    = tool.params_close_y|default(40)|float %}
++    {% set safe_y_force     = tool.params_safe_y|default(120)|float %}
++    {% set fast             = tool.params_fast_speed|default(99999)|float %}
++    {% set accel            = tool.params_fast_accel|default(printer.configfile.settings.printer.max_accel)|float %}
++    {% set path             = tool.params_pickup_path %}
++    {% set ps               = tool.params_path_speed|default(1000)|float %}
++    {% set tn               = tool.tool_number %}
++    {% set dock, start      = {}, {} %}
++    {% for ax in ('x', 'y', 'z') %}
++        {% set pos = tool['params_park_' ~ ax]|float %}
++        {% set _ = dock.update( { ax: pos } ) %}
++        {% set _ = start.update( { ax: pos + path[0].get(ax, 0)|float } ) %}
++    {% endfor %}
++
++    {% set close_y  = [(dock.y + path[-1]['y']) + 2, close_y_force]|max %}
++    {% set safe_y   = [safe_y_force, (dock.y + tool_size.y)]|max %}
++
++    # Are we actually in a printing state?
++    {% set printing = printer.print_stats.state|lower == 'printing' %}
++
++    # If printing, save current fan speed and force 100% during pickup
++    {% if printing and tool.extruder %}
++        _TOOLCHANGE_FAN TN={tn} SAVE=1
++        _TOOLCHANGE_FAN TN={tn} FULL=1
++    {% endif %}
++
++    {%- macro add_param(axis, path_step) -%}
++        {(' ' ~ axis|upper ~ '=' ~ (dock[axis] + path_step[axis])) if axis in path_step else ''}
++    {%- endmacro -%}
++
++    SET_VELOCITY_LIMIT ACCEL={accel}
++    # ─── Move to pick it up now
++    G90
++    {% if dropoff_tool is none %} # ensure we dont ram in Y
++        ROUNDED_G0 Z={start.z}  F={fast} D=20
++    {% endif %}
++
++    ROUNDED_G0 Y={close_y}              F={fast} D=5  #todo calc point distance, scale D accordingly.
++    ROUNDED_G0 X={start.x} Z={start.z}  F={fast} D=5
++    ROUNDED_G0 Y={start.y}              F={fast} D=0
++    
++    # 2026-10-12 (user): no longer wait for temp BEFORE picking up -- the tool heats while it is
++    # picked up and carried back; the M109 is now at the end of this macro (back at the tower).
++    # {% if tool.extruder %} # ─── wait for temp if has extruder and is heating (within 10°C)
++    #     {% set target, temp = printer[tool.extruder].target, printer[tool.extruder].temperature %}
++    #     { ('M109 T' ~ tn ~ ' S' ~ target) if target - 10.0 >= temp else '' }
++    # {% endif %}
++
++    # ─── Run the pickup path until we hit the 'verify' point.
++    {% for step in path %}
++        ROUNDED_G0{add_param('x', step)}{add_param('y', step)}{add_param('z', step)} F={ps * step.get('f', 1.0)|float} D={step.get('d', 1.0)}
++        {% if 'verify' in step %}
++            # ROUNDED_G0 D=0
++            # VERIFY_TOOL_DETECTED T={tn}
++        {% endif %}
++    {% endfor %}
++    # verify here or at verify. i do it here because theres less waiting 
++    #     (gcode button event should already arrive when we are here)
++    ROUNDED_G0 D=0
++
++    # ─── restore accel in case we error in verify.
++    SET_VELOCITY_LIMIT ACCEL={th.max_accel}
++    VERIFY_TOOL_DETECTED T={tn}
++    SET_VELOCITY_LIMIT ACCEL={accel}
++
++    #================================= PICKUP /\---/\ ===== RESTORE \/---\/ =================================
++
++    {% set rx = restore_position.get('X', False) %}
++    {% set ry = restore_position.get('Y', False) %}
++    {% set rz = restore_position.get('Z', False) %}
++
++    # ─── possibly choose the decend Y if it falls within our min max
++    {% set safe_y_max    = lim_max.y - tool_size.y - 10 %}
++    {% set safe_y_min    = [safe_y_force, (dock.y + tool_size.y)]|max %}
++    {% if ry and ry >= (safe_y_min + 10) and ry <= (safe_y_max - 10) %}
++        {% set safe_y = ry %}
++    {% endif %}
++
++    {% set safe_y_d = [10, (10 + (safe_y - tool_size.y) * 0.4142)]|max %} # allow scaling deviation
++
++    # ─── move out of docks.
++    ROUNDED_G0 Y={safe_y} F={fast} D={safe_y_d}
++
++    {% if rx and (dock.x - rx)|abs < min_D and rz %}  # join XZ segment if X is too short (corner ends up too sharp) 
++        ROUNDED_G0 X={rx} Z={rz + 10} F={fast} D=200
++    {% else %}
++        {% if rz %} ROUNDED_G0 Z={rz + 10} F={fast} D=200  {% endif %}
++        {% if rx %} ROUNDED_G0 X={rx}      F={fast} D=1000 {% endif %}
++    {% endif %}
++    {% if ry %} ROUNDED_G0 Y={ry} F={fast}   D=50 {% endif %}
++    {% if rz %} ROUNDED_G0 Z={rz} F={fast/5} D=0  {% endif %}
++
++    ROUNDED_G0 D=0
++
++    # 2026-10-12 (user): wait for temp at the END of the pickup, back at the prime tower, instead of
++    # in front of the dock. Target = what it was when this macro started (Orca's preheat M104 already
++    # set the print temp before the T command); M109 itself waits on the live temperature, and
++    # returns right away if the tool is already there.
++    # 2026-10-12: direct TEMPERATURE_WAIT on this tool's heater instead of `M109 T{tn}` -- the M109
++    # wrapper (tool_mapping.cfg) treats T as a SLICER number and remaps it, so with a Mainsail mapping
++    # active it would have waited on the wrong tool. _TC_WAIT_MARK logs how long each change waited.
++    {% if tool.extruder and printer[tool.extruder].target|float > 0 %}
++        G4 P0    # flush lookahead so _TC_WAIT_MARK can see how much motion is still queued
++        _TC_WAIT_MARK STAGE=start T={tn} EXTRUDER={tool.extruder}
++        TEMPERATURE_WAIT SENSOR={tool.extruder} MINIMUM={printer[tool.extruder].target|float - 2.0}
++        _TC_WAIT_MARK STAGE=end T={tn} EXTRUDER={tool.extruder} TARGET={printer[tool.extruder].target|float}
++    {% endif %}
++
++    SET_VELOCITY_LIMIT ACCEL={th.max_accel}
++
++    {% if printing and printer.toolchanger.status == 'ready' and 'tool_probe_endstop' in printer %}
++        START_TOOL_PROBE_CRASH_DETECTION T={tn}
++    {% endif %}
++
++    # Restore fan speed after pickup if we changed it
++    {% if printing and tool.extruder %}
++        _TOOLCHANGE_FAN TN={tn} RESTORE=1
++    {% endif %}
++
++
++# NOTE 2026-09-14: [gcode_macro RESUME] used to be declared here too, with the same
++# rename_existing: RESUME_BASE as sovol-macros.cfg's RESUME. Klipper's config loader silently
++# MERGES two sections with the same name instead of erroring, so this one (loaded later) was
++# quietly winning and sovol-macros.cfg's own resume logic never ran. Consolidated into the
++# single [gcode_macro RESUME] in sovol-macros.cfg -- this file's INITIALIZE_TOOLCHANGER /
++# VERIFY_TOOL_DETECTED lines now run there, first, before anything else.
++
++[gcode_macro TOOL_ALIGN_START]
++gcode:
++    INITIALIZE_TOOLCHANGER # Detect current tool
++    _TOOL_ALIGN_START
++
++[gcode_macro _TOOL_ALIGN_START]
++gcode:
++    {% set tool = printer[printer.toolchanger.tool] %}
++    SET_TOOL_PARAMETER PARAMETER='params_path_speed' VALUE=300
++    SET_GCODE_OFFSET X=0 Y=0 Z=0
++    G0 Y{tool.params_safe_y} F{tool.params_fast_speed}
++    G0 X{tool.params_park_x} Z{tool.params_park_z}
++    G0 Y{tool.params_park_y|float + 100.0}
++
++[gcode_macro TOOL_ALIGN_TEST]
++gcode:
++    {% set curpos = printer.gcode_move.gcode_position %}
++    {% if curpos[1] > 0 %}
++      # Check if Y is not too far, to very unrealistic tests.
++      RESPOND TYPE=error MSG='Test aborted. Tool too far away from the dock.'
++    {% else %}
++      INITIALIZE_TOOLCHANGER # Detect current tool
++      SET_GCODE_OFFSET X=0 Y=0 Z=0
++      SET_TOOL_PARAMETER PARAMETER='params_park_x' VALUE={curpos[0]}
++      SET_TOOL_PARAMETER PARAMETER='params_park_y' VALUE={curpos[1]}
++      SET_TOOL_PARAMETER PARAMETER='params_park_z' VALUE={curpos[2]}
++      TEST_TOOL_DOCKING RESTORE_AXIS=XYZ
++    {% endif %}
++
++[gcode_macro TOOL_ALIGN_DONE]
++gcode:
++    {% set tool = printer[printer.toolchanger.tool] %}
++    SAVE_TOOL_PARAMETER PARAMETER='params_park_x'
++    SAVE_TOOL_PARAMETER PARAMETER='params_park_y'
++    SAVE_TOOL_PARAMETER PARAMETER='params_park_z'
++    RESET_TOOL_PARAMETER PARAMETER='params_path_speed'
++    G0 Y{tool.params_safe_y} F{tool.params_fast_speed}
++
++
++[toolchanger]
+ params_failure_speed_divider: 5
+ params_failure_acceleration: 1000
+ 
+@@ -54,9 +438,12 @@
+     {% if rz %} ROUNDED_G0 Z={ rz } F={ fast/5 } D=0  {% endif %}
+ 
+     ROUNDED_G0 D=0
+-    {% if printer.print_stats.state|lower == 'printing' and 'tool_probe_endstop' in printer %}
++    {% if printer.print_stats.state|lower == 'printing'
++          and printer.toolchanger.status == 'ready'
++          and 'tool_probe_endstop' in printer %}
+         START_TOOL_PROBE_CRASH_DETECTION T={ tn }
+     {% endif %}
++
+ 
+     # IMPORTANT VERY VERY IMPORTANT
+     # here we have to overwrite the pause state! or else it will just shoot back up to the docks!!!
+@@ -87,17 +474,21 @@
+         _TOOLCHANGE_ERROR_HANDLER RETRY=FAIL
+         M400
+         SET_VELOCITY_LIMIT ACCEL={ printer.toolhead.max_accel }
+-        _RAISE MSG="toolchange failure, current execution was stopped."
++        RESPOND TYPE=error MSG="toolchange failure, current execution was stopped. Open the _TOOLCHANGE_ERROR_HANDLER UI to recover."
+ 
+     {% else %} # ASYNC trigger.
+         PAUSE_BASE
+-        _RAISE MSG="toolchange failure, failure in verify! not at expected position! not engaging recovery!!!"
++        RESPOND TYPE=error MSG="toolchange failure during verify – not at expected position, manual recovery required."
++
+         
+     {% endif %}
+ 
++# MAYBE-DEAD 2026-10-03: no callers found anywhere; usage counted by _MAYBE_DEAD_HIT (see maybe_dead_tracker.cfg)
+ [gcode_macro _RAISE]
+ gcode:
+-    {action_raise_error('<b>[_RAISE]</b> ' ~ params.MSG|default('dunno why'))}
++    _MAYBE_DEAD_HIT NAME=_RAISE
++    RESPOND TYPE=error MSG="[_RAISE] {params.MSG|default('dunno why')}"
++
+ 
+ [gcode_macro _TOOLCHANGE_ERROR_HANDLER]
+ description: "A UI to allow you to handle toolchange failures and recover them"
+@@ -336,3 +727,142 @@
+     {% else %}
+         _toolchange_error_handler RETRY=FAIL
+     {% endif %}
++
++[toolchanger]
++# on_tool_mounted_gcode:
++#     {% if toolchanger.status|lower != 'error' %}
++#         INITIALIZE_TOOLCHANGER
++#         # equally keep the tool probe up to date if you want
++#         {% if printer.tool_probe_endstop is defined %}
++#             SET_ACTIVE_TOOL_PROBE T={detected_tool.tool_number}
++#         {% endif %}
++#     {% endif %}
++
++# on_tool_removed_gcode:
++#     {% if toolchanger.status|lower != 'error' %}
++#         INITIALIZE_TOOLCHANGER
++#     {% endif %}
++#     {% if printer.print_stats.state|lower == 'printing' %}
++#         PAUSE_BASE # or whatever your pause is called like, (its usually PAUSE_BASE when using mainsail)
++#     {% endif %}
++
++[gcode_macro SELECT_TOOL]
++rename_existing: _SELECT_TOOL_BASE
++gcode:
++  {% set t = params.T|int %}
++  _SELECT_TOOL_BASE T={t}
++
++  # Give the toolchanger a moment to settle
++  G4 P200
++
++  # Always load shapers (including T0)
++  TC_LOAD_SHAPERS T={t}
++
++  # Never auto-apply T0 probe/nozzle offsets
++  {% if t|int != 0 %}
++    _TC_UPDATE_OFFSETS LOAD_ALL=1
++    _TC_UPDATE_TOOL_PROBE_Z_OFFSETS LOAD_ALL=1
++  {% endif %}
++
++
++[gcode_macro _TC_WAIT_MARK]
++description: 2026-10-12 -- how long a tool change waits at the prime tower for the nozzle to heat (printing only).
++  STAGE=reset (start of print) | start / end (around the pickup temperature wait) | summary (END_PRINT)
++variable_start: 0.0
++variable_buffered: 0.0
++variable_start_temp: 0.0
++variable_per_tool: {}
++gcode:
++    {% set stage = params.STAGE|default('end')|lower %}
++    {% set ext = params.EXTRUDER|default('') %}
++    {% set now = printer.print_stats.total_duration|float %}
++    {% if stage == 'reset' %}
++        SET_GCODE_VARIABLE MACRO=_TC_WAIT_MARK VARIABLE=per_tool VALUE="{ {} }"
++        SET_GCODE_VARIABLE MACRO=_TC_STATS VARIABLE=print_changes VALUE=0
++    {% elif stage == 'start' %}
++        # motion still queued when the wait starts would have happened anyway -> not counted as waiting
++        {% set th = printer.toolhead %}
++        SET_GCODE_VARIABLE MACRO=_TC_WAIT_MARK VARIABLE=start VALUE={now}
++        SET_GCODE_VARIABLE MACRO=_TC_WAIT_MARK VARIABLE=buffered VALUE={[th.print_time|float - th.estimated_print_time|float, 0.0]|max}
++        SET_GCODE_VARIABLE MACRO=_TC_WAIT_MARK VARIABLE=start_temp VALUE={printer[ext].temperature|float if ext in printer else 0.0}
++    {% elif stage == 'end' and printer.print_stats.state == 'printing' %}
++        # 2026-10-12 (user): report any real stall, even under 1 s (time beyond the motion that was still
++        # finishing, to 0.1 s). No line when the tool caught up during the move.
++        {% set waited = [now - start - buffered, 0.0]|max %}
++        {% set key = 'T' ~ params.T|default('?') %}
++        {% set rec = per_tool[key]|default([0, 0, 0.0]) %}
++        {% set did_wait = waited >= 0.05 %}
++        {% set pt = dict(per_tool) %}
++        {% set _ = pt.update({key: [rec[0] + 1, rec[1] + (1 if did_wait else 0), ((rec[2] + (waited if did_wait else 0.0))|float)|round(2)]}) %}
++        SET_GCODE_VARIABLE MACRO=_TC_WAIT_MARK VARIABLE=per_tool VALUE="{pt}"
++        {% if did_wait %}
++            { action_respond_info("%s waited %.1f s at the prime tower to reach temp (%.0f -> %.0f C)"
++                % (key, waited, start_temp, params.TARGET|default(0)|float)) }
++        {% endif %}
++    {% elif stage == 'summary' %}
++        # averages only (for tuning ooze prevention / standby temp): average wait when a tool DID wait
++        {% set lines = [] %}
++        {% for key in per_tool|sort %}
++            {% set rec = per_tool[key] %}
++            {% if rec[1] > 0 %}
++                {% set _ = lines.append("%s: avg wait %.1f s (waited on %d of %d changes)" % (key, rec[2] / rec[1], rec[1], rec[0])) %}
++            {% else %}
++                {% set _ = lines.append("%s: never waited (%d changes)" % (key, rec[0])) %}
++            {% endif %}
++        {% endfor %}
++        {% if lines %}
++            { action_respond_info("Tool-change heat waits this print:\n" ~ lines|join("\n")) }
++        {% endif %}
++    {% endif %}
++
++
++[gcode_macro _TC_STATS]
++description: 2026-10-12 -- tool change success counters (like Trad Rack). RESULT=ok|fail T=n (from
++  _STOP_IF_INCORRECT_TOOL), ACTION=save|show. Kept in memory; saved to variables.cfg (tc_stats) at
++  print end / cancel and right away on a failure, so variables.cfg is not rewritten every tool change.
++variable_stats: None
++variable_print_changes: 0
++gcode:
++    {% set saved = printer.save_variables.variables.tc_stats|default({}) %}
++    {% set st = dict(stats if stats is not none else saved) %}
++    {% set tools = dict(st.get('tools', {})) %}
++    {% set key = 'T' ~ params.T|default('?') %}
++    {% set res = params.RESULT|default('')|lower %}
++    {% set act = params.ACTION|default('')|lower %}
++    {% if res in ['ok', 'fail'] %}
++        {% set rec = tools.get(key, [0, 0]) %}
++        {% set prev = st.get('since_fail', 0) %}
++        {% if res == 'ok' %}
++            {% set _ = tools.update({key: [rec[0] + 1, rec[1]]}) %}
++            {% set _ = st.update({'ok': st.get('ok', 0) + 1, 'since_fail': prev + 1, 'best_streak': [st.get('best_streak', 0), prev + 1]|max}) %}
++        {% else %}
++            {% set _ = tools.update({key: [rec[0], rec[1] + 1]}) %}
++            {% set _ = st.update({'fail': st.get('fail', 0) + 1, 'since_fail': 0, 'last_fail': key}) %}
++        {% endif %}
++        {% set _ = st.update({'tools': tools}) %}
++        SET_GCODE_VARIABLE MACRO=_TC_STATS VARIABLE=stats VALUE="{st}"
++        SET_GCODE_VARIABLE MACRO=_TC_STATS VARIABLE=print_changes VALUE={print_changes + 1}
++        {% if res == 'fail' %}
++            SAVE_VARIABLE VARIABLE=tc_stats VALUE="{st}"
++            { action_respond_info("Tool change FAILED on %s -- streak reset after %d successful changes (%d failures overall)" % (key, prev, st['fail'])) }
++        {% endif %}
++    {% elif act == 'save' %}
++        {% if stats is not none %}
++            SAVE_VARIABLE VARIABLE=tc_stats VALUE="{st}"
++        {% endif %}
++    {% elif act == 'show' %}
++        {% set per = [] %}
++        {% for k in tools|sort %}
++            {% set _ = per.append("%s %d ok / %d failed" % (k, tools[k][0], tools[k][1])) %}
++        {% endfor %}
++        { action_respond_info("Tool changes: %d total (%d failed) | %d since the last failure%s | best streak %d | this print %d\n%s"
++            % (st.get('ok', 0) + st.get('fail', 0), st.get('fail', 0), st.get('since_fail', 0),
++               (" (" ~ st['last_fail'] ~ ")") if 'last_fail' in st else "", st.get('best_streak', 0), print_changes,
++               per|join(", ") if per else "no tool changes counted yet")) }
++    {% endif %}
++
++
++[gcode_macro TC_STATS]
++description: Show tool change counters (total, failures, since the last failure, per tool)
++gcode:
++    _TC_STATS ACTION=show

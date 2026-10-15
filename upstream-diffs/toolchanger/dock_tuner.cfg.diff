@@ -1,0 +1,232 @@
+--- upstream/examples/dock location/fixed/dock_tuner.cfg @ fbcd211
++++ config/toolchanger/dock_tuner.cfg
+@@ -8,9 +8,7 @@
+     {% set NAME         = 'DOCK_TUNER' %}
+     {% set tc           = printer.toolchanger %}
+     {% set tpe          = printer.tool_probe_endstop if 'tool_probe_endstop' in printer else {} %}
+-    {% set use_docking_mode = ignore_gcode_offsets and ('ENTER_DOCKING_MODE' in printer.gcode.commands) 
+-                                                   and ('EXIT_DOCKING_MODE'  in printer.gcode.commands) %}
+-    {% set provided_tn  = params.T|d('only provide when no tool selected/active')|int(None) %}
++    {% set provided_tn  = params.T|default('only provide when no tool selected/active')|int(None) %}
+     # HACK HACK HACK (comment this out if it ever causes problems) \/ \/ \/ \/ \/ 
+     {% if not state.ui_is_open and tpe %}
+         {% set _tpe = printer.printer.lookup_object('tool_probe_endstop', None) %}
+@@ -32,31 +30,24 @@
+     
+     # ╭──────────────────────────────── Ensure you dont crash ────────────────────────────────╮
+     {% if tn in [None, -1] and provided_tn is none %}
++        { action_raise_error('DOCK_TUNER: no tool selected please provide <c>T</c>') }
+         { action_respond_info('<i>If you think this is a mistake, run <c>DOCK_TUNER RESET=1</c>') }
+-        { action_raise_error('DOCK_TUNER: no tool selected please provide <c>T</c>') }
+     {% elif tn_detected != -1 and provided_tn is not none and not state.get('ui_is_open', False) %}
+-        { action_respond_info('<i>If you think this is a mistake, run <c>DETECT_ACTIVE_TOOL_PROBE</c>') if tpe else '' }
+         { action_raise_error('DOCK_TUNER: please only provide <c>T</c> after dropping the tool off.') }
+-    {% elif not state.ui_is_open and (tn_detected != tn) %}
+-        # first time open, detected and active are desynced.
+-        { action_raise_error('detected tool (' ~ tn_detected ~ ') ≠ toolchangers tool number (' ~ tn ~ ')<br>Please reinitialize toolchanger (<code>INITIALIZE_TOOLCHANGER</code>)') }
++        { action_respond_info('<i>If you think this is a mistake, run <c>DETECT_ACTIVE_TOOL_PROBE</c>' if tpe else '') }
+     {% elif tn == -1 %}
+         {% set tn = provided_tn %} # if for some reason it initializes with none mid run, dont fail with tn = -1
+     {% endif %}
+     # ╰───────────────────────────────────────────────────────────────────────────────────────╯
+ 
+-    {% if use_docking_mode and not state._docking_mode %}
+-        ENTER_DOCKING_MODE
+-        {% set _ = state.update({'_docking_mode': True}) %}
+-    {% endif %}
+-
+-    {% set tool         = printer[tc.tool_names[tc.tool_numbers.index(tn)]] %}
++    {% set tool         = printer[tc.tool_names[tn]] %}
+     {% set tname_short  = tool.name|replace('tool ', '') %}
+     {% set dock         = {'x': tool.params_park_x|float, 'y': tool.params_park_y|float, 'z': tool.params_park_z|float} %}
+     {% set pick         = tool.params_pickup_path %}
+     {% set drop         = tool.params_dropoff_path %}
+     {% set ps           = (tool.params_path_speed or 1000)|float %}
+     {% set safe_y       = (tool.params_safe_y or 120)|float %}
++
+     {% set y_safe_off   = safe_y - dock.y %}
+ 
+     {% macro ui(m) %}{ action_respond_info('action:prompt_' ~ m) }{% endmacro %}
+@@ -84,18 +75,18 @@
+         {%- endfor -%}
+     {%- endmacro -%}
+ 
+-    {%- macro move_step(s) -%}
+-        {%- set parmesan, keys = [], ['x', 'y', 'z'] -%}
+-        {%- set home = printer.gcode_move.homing_origin if ignore_gcode_offsets else dict.fromkeys(keys, 0.0) -%}
+-        {%- for ax in keys %}
+-            {%- set position = (dock[ax] + s[ax] - home[ax])|round(2) -%}
+-            {%- set _ = parmesan.append(ax|upper ~ position) -%}
+-        {%- endfor -%}
+-        {%- set _ = parmesan.append('F' ~ (ps * s.f * state.get('speed_multiplier', 1.0))|round(2) ) -%}
+-        {'\nG90'}
+-        {'\nG0 ' ~ parmesan|join(' ')}
+-        { ('\n' ~ detect_cmd) if 'verify' in s and detect_cmd else '' }
+-    {%- endmacro -%}
++    {% macro move_step(s) %}
++        {% set parmesan, keys = [], ['x', 'y', 'z'] %}
++        {% set home = printer.gcode_move.homing_origin if ignore_gcode_offsets else dict.fromkeys(keys, 0.0) %}
++        {% for ax in keys %}
++            {% set position = (dock[ax] + s[ax] - home[ax])|round(2) %}
++            {% set _ = parmesan.append(ax|upper ~ position) %}
++        {% endfor %}
++        {% set _ = parmesan.append('F' ~ (ps * s.f * state.get('speed_multiplier', 1.0))|round(2) ) %}
++        G90
++        G0 {parmesan|join(' ')}
++        {'DETECT_ACTIVE_TOOL_PROBE' if 'verify' in s and tpe else ''}
++    {% endmacro %}
+ 
+     {% macro walk(dir, stop_kind, stop_arg = 0) %}
+         {% set ns = namespace(i=state.idx, last=0, moved=0, done=0) %}
+@@ -105,8 +96,8 @@
+         {% set ns.last = ns.i %}
+         {% for _ in range(N) if not ns.done %}
+             {% set j = (ns.i + dir) % N %} # wraparound
+-            {% set A = c[j] %}
+-            {% if not is_dup_node(A, c[ns.last]) %}
++            {% set A = cycle[j] %}
++            {% if not is_dup_node(A, cycle[ns.last]) %}
+                 { move_step(A) }
+                 {% set ns.last = j %}
+                 {% set _ = state.update({'idx': j}) %}
+@@ -136,22 +127,25 @@
+ 
+     {%- macro upsample_path(path, factor=path_interpolation) -%}
+         # interpolate the steps
+-        {% set factor, N = factor|int,path|length  %}
+-        {% for idx in range(N - 1, 0, -1) if factor > 1 %}
+-            {% set a, b = path[idx - 1], path[idx] %}
+-            {% set ax, ay, az, af = a.get('x')|float, a.get('y')|float, a.get('z')|float, a.get('f', 1.0)|float %}
+-            {% set bx, by, bz, bf = b.get('x')|float, b.get('y')|float, b.get('z')|float, b.get('f', 1.0)|float %}
+-            {% for k in range(factor - 1) %}
+-                {% set t = (factor - 1 - k) / factor %}
+-                {% set node = {
+-                    'x': (ax + (bx - ax) * t)|round(4),
+-                    'y': (ay + (by - ay) * t)|round(4),
+-                    'z': (az + (bz - az) * t)|round(4),
+-                    'f': (af + (bf - af) * t)|round(4)
+-                } %}
+-                {% set _ = path.insert(idx, node) %}
++        {% set factor = factor|int %}
++        {% if factor > 1 %}
++            {% set N = path|length %}
++            {% for idx in range(N - 1, 0, -1) %}
++                {% set a, b = path[idx - 1], path[idx] %}
++                {% set ax, ay, az, af = a.get('x')|float, a.get('y')|float, a.get('z')|float, a.get('f', 1.0)|float %}
++                {% set bx, by, bz, bf = b.get('x')|float, b.get('y')|float, b.get('z')|float, b.get('f', 1.0)|float %}
++                {% for k in range(factor - 1) %}
++                    {% set t = (factor - 1 - k) / factor %}
++                    {% set node = {
++                        'x': (ax + (bx - ax) * t)|round(4),
++                        'y': (ay + (by - ay) * t)|round(4),
++                        'z': (az + (bz - az) * t)|round(4),
++                        'f': (af + (bf - af) * t)|round(4)
++                    } %}
++                    {% set _ = path.insert(idx, node) %}
++                {% endfor %}
+             {% endfor %}
+-        {% endfor %}
++        {% endif %}
+     {%- endmacro -%}
+     # ╰──────────────────────────────────────────────────────────────────────────────────╯
+ 
+@@ -178,7 +172,7 @@
+         { ui('text Run through the path') }
+         { but('[ ⭮ run pick ]|'     ~ NAME ~ ' RUN=PICK T=' ~ tn ~ '|rgba(72,150,160,0.84)',  'first') }
+         { but('[ run drop ⭯ ]|'     ~ NAME ~ ' RUN=DROP T=' ~ tn ~ '|rgba(220,155,110,0.86)', 'last') }
+-        { but('[❔check detect ]|'  ~ NAME ~ ' CHECK=1 T='  ~ tn ~ '|rgba(' ~ C_RESET|join(',') ~ ',' ~ 0.7 ~ ')',  'first') }
++        { but('[❔check detect ]|' ~ NAME ~ ' CHECK=1 T='  ~ tn ~ '|rgba(' ~ C_RESET|join(',') ~ ',' ~ 0.7 ~ ')',  'first') }
+         { ui('show') }
+ 
+         # --------------------------------- adjusting the docking speed ---------------------------------
+@@ -232,32 +226,28 @@
+     {% set y_half_pick = (y_safe_off + pick[0].get('y', 0)|float) / 2.0 %}
+     {% set y_half_drop = (y_safe_off + drop[0].get('y', 0)|float) / 2.0 %}
+ 
+-    {% set c = [] %}
+-
+-    {% set _ = c.append(safe_node) %}
+-    {% set _ = c.append({'y': y_half_pick, 'z': pick_approach_z, 'f': fast_speed}) %}
+-    {% set _ = c.append({'x': pick[0].get('x', 0)|float, 'z': pick[0].get('z', 0)|float, 'y': y_half_pick, 'f': fast_speed}) %}
+-    {% set _ = c.append({'x': pick[0].get('x', 0)|float, 'z': pick[0].get('z', 0)|float, 'y': pick[0].get('y', 0)|float, 'f': fast_speed}) %}
+-
+-    {% set pick_start = c|length %}
+-    {% set _ = c.extend(pick) %}
+-    {% set pick_end   = c|length - 1 %}
++    {% set cycle = [] %}
++
++    {% set _ = cycle.append(safe_node) %}
++    {% set _ = cycle.append({'y': y_half_pick, 'z': pick_approach_z, 'f': fast_speed}) %}
++    {% set _ = cycle.append({'x': pick[0].get('x', 0)|float, 'z': pick[0].get('z', 0)|float, 'y': y_half_pick, 'f': fast_speed}) %}
++    {% set _ = cycle.append({'x': pick[0].get('x', 0)|float, 'z': pick[0].get('z', 0)|float, 'y': pick[0].get('y', 0)|float, 'f': fast_speed}) %}
++
++    {% set pick_start = cycle|length %}{% set _ = cycle.extend(pick) %}{% set pick_end   = cycle|length - 1 %}
+ 
+     {% set pu_verify = pick_start + pick.index(verify_step) if verify_step else -1 %}
+ 
+-    {% set _ = c.append({'y': y_half_pick, 'z': pick_leave_z, 'f': fast_speed}) %}
+-    {% set _ = c.append(safe_node) %} # <- you start here
+-    {% set _ = c.append({'y': y_half_drop, 'z': drop_approach_z, 'f': fast_speed}) %}
+-    {% set _ = c.append({'x': drop[0].get('x', 0)|float, 'z': drop[0].get('z', 0)|float, 'y': y_half_drop, 'f': fast_speed}) %}
+-    {% set _ = c.append({'x': drop[0].get('x', 0)|float, 'z': drop[0].get('z', 0)|float, 'y': drop[0].get('y', 0)|float, 'f': fast_speed}) %}
+-
+-    {% set drop_start = c|length %}
+-    {% set _ = c.extend(drop) %}
+-    {% set drop_end   = c|length - 1 %}
+-
+-    {% set _ = normalize_path(c) %}
+-
+-    {% set N    = c|length %}
++    {% set _ = cycle.append({'y': y_half_pick, 'z': pick_leave_z, 'f': fast_speed}) %}
++    {% set _ = cycle.append(safe_node) %} # <- you start here
++    {% set _ = cycle.append({'y': y_half_drop, 'z': drop_approach_z, 'f': fast_speed}) %}
++    {% set _ = cycle.append({'x': drop[0].get('x', 0)|float, 'z': drop[0].get('z', 0)|float, 'y': y_half_drop, 'f': fast_speed}) %}
++    {% set _ = cycle.append({'x': drop[0].get('x', 0)|float, 'z': drop[0].get('z', 0)|float, 'y': drop[0].get('y', 0)|float, 'f': fast_speed}) %}
++
++    {% set drop_start = cycle|length %}{% set _ = cycle.extend(drop) %}{% set drop_end   = cycle|length - 1 %}
++
++    {% set _ = normalize_path(cycle) %}
++
++    {% set N    = cycle|length %}
+     {% set cur  = N - 1 if state.idx < 0 else state.idx %}
+     # ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+ 
+@@ -343,16 +333,9 @@
+             </blockquote>
+         {%- endset -%}
+         { action_respond_info(block|replace('\n','')) }
+-        {% if state.get('_docking_mode', False) and use_docking_mode %}
+-            EXIT_DOCKING_MODE
+-            {% set _ = state.update({'_docking_mode': False}) %}
+-        {% endif %}
+ 
+     {% elif 'RESET' in params %}
+-        {% if state.get('_docking_mode', False) and use_docking_mode %}
+-            EXIT_DOCKING_MODE
+-        {% endif %}
+-        {% set state = {'ui_is_open': False, 'idx': -1, '_docking_mode': False} %}
++        {% set state = {'ui_is_open': False, 'idx': -1} %}
+ 
+     {% elif 'SPD' in params %}
+         {% set _ = state.update({'speed_multiplier': params.SPD|float|round(2)}) %}
+@@ -361,7 +344,7 @@
+         { create_ui() }
+         # if provided_tn gets to here, we have no tool equipped and start at IDX 0
+         {% set start_idx = pick_end + 2 if provided_tn is none else 0 %}
+-        { move_step(c[start_idx]) }
++        { move_step(cycle[start_idx]) }
+         {% set _ = state.update({'ui_is_open': True,
+                                  'orig_dock': dock,
+                                  'idx': start_idx
+@@ -381,10 +364,6 @@
+         {% set state = printer['gcode_macro DOCK_TUNER'].state %}
+         {% if state.get('ui_is_open', False) %}
+             {% set _ = state.update({'ui_is_open': False}) %}
+-            {% if state._docking_mode and ('EXIT_DOCKING_MODE' in printer.gcode.commands) %}
+-                EXIT_DOCKING_MODE
+-                {% set _ = state.pop('_docking_mode', None) %}
+-            {% endif %}
+             SET_GCODE_VARIABLE MACRO=DOCK_TUNER VARIABLE=state VALUE="{state}"
+         {% endif %}
+-    {% endif %}
++    {% endif %}

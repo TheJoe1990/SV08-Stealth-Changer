@@ -1,0 +1,8 @@
+--- upstream/usermods/VIN-y/save_baby_steps/offsets_adjust_record.cfg @ fbcd211
++++ config/toolchanger/offsets_adjust_record.cfg
+@@ -126,4 +126,4 @@
+     SET_GCODE_VARIABLE MACRO=_RECORD VARIABLE=za VALUE=999.9
+     SET_GCODE_VARIABLE MACRO=_RECORD VARIABLE=xr VALUE=0.0
+     SET_GCODE_VARIABLE MACRO=_RECORD VARIABLE=yr VALUE=0.0
+-    SET_GCODE_VARIABLE MACRO=_RECORD VARIABLE=zr VALUE=0.0
++    SET_GCODE_VARIABLE MACRO=_RECORD VARIABLE=zr VALUE=0.0
